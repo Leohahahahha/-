@@ -1,6 +1,6 @@
 # A/F/T 慢专家设计与源码学习说明
 
-状态：设计待用户审阅；尚未实现。日期：2026-09-21。
+状态：用户已确认架构并要求实施；尚未实现。日期：2026-09-21。
 
 ## 1. 目标与边界
 
@@ -77,7 +77,7 @@ T/F专家、force MLP和新adapter显式初始化。新权重载入规则按模�
 
 LoRA配置：已有主干/动作专家采用LoRA；随机新增模块全部训练；TCN训练策略显式配置。全量配置：所有参数可训练。两者都打印分模块总参数、可训练参数、dtype与权重来源。
 
-精度可选全FP32或混合策略：大Transformer矩阵BF16，敏感层/TCN/投影FP32，梯度和Adam状态FP32；新模块必须纳入dtype规则。EMA默认关闭。保留FSDP选项，双卡候选FSDP=2/global batch=2，但不宣称已验证可运行。
+精度可选全FP32或混合策略：VLM/动作专家大Transformer矩阵及其LoRA为BF16；触觉和力的全部分支参数（含完整专家、TCN、MLP及投影）为FP32；敏感层/输入embedding/动作投影/时间MLP为FP32；梯度和Adam状态FP32。参数存储与共同QKV计算dtype分离配置，联合注意力默认BF16接口、softmax按现有FP32稳定路径，不能宣传为整个感知分支全程FP32计算。新模块必须纳入dtype规则。EMA默认关闭。保留FSDP选项，双卡候选FSDP=2/global batch=2，但不宣称已验证可运行。
 
 八套配置命名按backbone、dataset、tuning组合生成，分别使用独立assets/checkpoint/run目录；W&B按用户既有要求启用。训练步数、学习率和保存间隔均显式可覆盖，不在本次设计中擅自启动训练或覆盖旧run。
 
