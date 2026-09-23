@@ -30,6 +30,8 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
+from openpi.models.aft_types import AFTTargets
+from openpi.models.aft import AFTModel
 
 
 def eval_step(rng, state, batch):
@@ -37,6 +39,9 @@ def eval_step(rng, state, batch):
     model = nnx.merge(state.model_def, state.params)
     model.eval()
     observation, actions = batch
+    if isinstance(model, AFTModel):
+        loss, components = model.compute_loss(rng, observation, actions, train=False, return_components=True)
+        return {"loss": jnp.mean(loss, dtype=jnp.float32), **components}
     if isinstance(model, Pi0):
         loss, components = model.compute_loss(rng, observation, actions, train=False, return_components=True)
         return {"loss": jnp.mean(loss, dtype=jnp.float32), "action_loss": components["action_loss"]}
@@ -102,16 +107,17 @@ def apply_parameter_dtype_policy(params: nnx.State, config: _config.TrainConfig)
     policy = config.parameter_dtype_policy
     if policy is None:
         return params
+    dtype_filter = nnx.Param if policy.include_frozen else config.trainable_filter
 
     params = nnx_utils.state_map(
         params,
-        config.trainable_filter,
+        dtype_filter,
         lambda p: p.replace(p.value.astype(jnp.dtype(policy.default_trainable_dtype))),
     )
     for rule in policy.overrides:
         params = nnx_utils.state_map(
             params,
-            nnx.All(config.trainable_filter, nnx_utils.PathRegex(rule.path_regex)),
+            nnx.All(dtype_filter, nnx_utils.PathRegex(rule.path_regex)),
             lambda p, dtype=rule.dtype: p.replace(p.value.astype(jnp.dtype(dtype))),
         )
     return params
@@ -205,14 +211,14 @@ def train_step(
     config: _config.TrainConfig,
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
-    batch: tuple[_model.Observation, _model.Actions],
+    batch: tuple[_model.Observation, _model.Actions | AFTTargets],
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
 
     @at.typecheck
     def loss_fn(
-        model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
+        model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions | AFTTargets
     ):
         if isinstance(model, Pi0) and getattr(model, "tactile_type", None) is TactileType.EXPERT_HIS_C_FUT:
             # Loss component computation and logging behavior.
@@ -238,6 +244,8 @@ def train_step(
             "action_loss": action_loss_mean,
             "tactile_loss": tactile_loss_mean,
         }
+        if isinstance(model, AFTModel):
+            aux['wrench_loss'] = components['wrench_loss']
         return total_loss, aux
 
     train_rng = jax.random.fold_in(rng, state.step)
@@ -295,6 +303,7 @@ def train_step(
         # Implementation note.
         "action_loss": aux["action_loss"],
         "tactile_loss": aux["tactile_loss"],
+        **({'wrench_loss': aux['wrench_loss']} if 'wrench_loss' in aux else {}),
         **finite_checks,
         "update_applied": update_applied,
         "first_bad_grad_index": numerics.first_nonfinite_leaf(grads),

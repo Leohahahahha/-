@@ -34,6 +34,59 @@ class NoOpWeightLoader(WeightLoader):
         return params
 
 
+AFT_NEW_PATTERNS = (
+    r'(?:tactile_expert|force_expert|tactile_history_proj|force_history_in|force_history_out)/.*',
+    r'PaliGemma/llm/.*(?:_2|_3)(?:/.*)?',
+)
+
+
+def merge_aft_sources(params, backbone, tactile, *, allowed_new_patterns=AFT_NEW_PATTERNS,
+                      allow_new_lora=False, random_tactile=False):
+    """Strict shared-module restore, with explicit provenance for new leaves."""
+    flatten = lambda tree: flax.traverse_util.flatten_dict(tree, sep='/')
+    expected, base, touch = map(flatten, (params, backbone, tactile))
+    result = {}
+    base_has_lora = any('lora' in key for key in base)
+    for key, initial in expected.items():
+        is_tactile = key.startswith('tactile_prefix_encoder/')
+        source = touch if is_tactile else base
+        if key in source:
+            if source[key].shape != initial.shape:
+                raise ValueError(f'AFT shape mismatch for {key}: {source[key].shape} != {initial.shape}')
+            result[key] = source[key].astype(initial.dtype)
+        elif (any(re.fullmatch(pattern, key) for pattern in allowed_new_patterns)
+              or (is_tactile and random_tactile)
+              or (allow_new_lora and not base_has_lora and 'lora' in key and not is_tactile)):
+            result[key] = initial
+            logger.info('AFT explicit new leaf: %s', key)
+        else:
+            raise ValueError(f'AFT missing required pretrained leaf: {key}')
+    # A backbone checkpoint may contain a complete old tactile encoder; this is
+    # deliberately superseded by the explicitly selected tactile source only.
+    extra = {k for k in base if k not in expected and not k.startswith('tactile_prefix_encoder/')}
+    extra |= {k for k in touch if k.startswith('tactile_prefix_encoder/') and k not in expected}
+    if extra:
+        raise ValueError(f'AFT unexpected source leaves: {sorted(extra)}')
+    return flax.traverse_util.unflatten_dict(result, sep='/')
+
+
+@dataclasses.dataclass(frozen=True)
+class AFTWeightLoader(WeightLoader):
+    backbone_params_path: str
+    tactile_params_path: str | None
+    allowed_new_patterns: tuple[str, ...] = AFT_NEW_PATTERNS
+    allow_new_lora: bool = False
+
+    def load(self, params):
+        backbone = _model.restore_params(download.maybe_download(self.backbone_params_path), restore_type=np.ndarray)
+        tactile = (backbone if self.tactile_params_path == self.backbone_params_path else
+                   _model.restore_params(download.maybe_download(self.tactile_params_path), restore_type=np.ndarray)
+                   if self.tactile_params_path is not None else {})
+        logger.info('AFT backbone=%s tactile=%s', self.backbone_params_path, self.tactile_params_path)
+        return merge_aft_sources(params, backbone, tactile, allowed_new_patterns=self.allowed_new_patterns,
+                                 allow_new_lora=self.allow_new_lora, random_tactile=self.tactile_params_path is None)
+
+
 @dataclasses.dataclass(frozen=True)
 class CheckpointWeightLoader(WeightLoader):
     """Loads an entire set of weights from a checkpoint.

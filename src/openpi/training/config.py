@@ -54,6 +54,7 @@ class ParameterDtypePolicy:
     overrides: tuple[ParameterDtypeRule, ...] = ()
     gradient_dtype: Literal["match_parameter", "float32"] = "match_parameter"
     optimizer_state_dtype: Literal["match_parameter", "float32"] = "match_parameter"
+    include_frozen: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -114,6 +115,11 @@ class DataConfig:
     # sequence is defined by the `action_horizon` field in the model config. This should be adjusted if your
     # LeRobot dataset is using different keys to represent the action.
     action_sequence_keys: Sequence[str] = ("actions",)
+    # New AFT dataset windowing is opt-in and never inferred from column names.
+    aft_enabled: bool = False
+    aft_edges_path: str | None = None
+    aft_manifest_path: str | None = None
+    aft_action_state_step_offset: int = 0
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
@@ -241,6 +247,26 @@ class DataConfigFactory(abc.ABC):
         except FileNotFoundError:
             logging.info(f"Norm stats not found in {data_assets_dir}, skipping.")
         return None
+
+
+@dataclasses.dataclass(frozen=True)
+class AFTDataConfig(DataConfigFactory):
+    def create(self, assets_dirs, model_config):
+        from openpi.policies.aft_policy import AFTInputs
+        base = self.create_base_config(assets_dirs, model_config)
+        asset_dir = pathlib.Path(self.assets.assets_dir or assets_dirs) / base.asset_id
+        if base.norm_stats is not None:
+            from openpi.training.aft_assets import validate_assets, file_hash
+            manifest = validate_assets(asset_dir, model_config, base)
+            if base.aft_edges_path is not None and file_hash(base.aft_edges_path) != manifest['adjacency_sha256']:
+                raise ValueError('AFT overridden adjacency hash mismatch')
+        return dataclasses.replace(base,
+            aft_edges_path=base.aft_edges_path or str(asset_dir / 'adjacency.json'),
+            aft_manifest_path=str(asset_dir / 'manifest.json'),
+            data_transforms=_transforms.Group(inputs=[AFTInputs(model_config.model_type),
+                                                      _transforms.RelativePoseActions()],
+                                               outputs=[_transforms.AbsolutePoseActions()]),
+            model_transforms=ModelTransformFactory()(model_config))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2196,6 +2222,9 @@ _CONFIGS.append(
         },
     )
 )
+
+from openpi.training.aft_configs import make_aft_configs
+_CONFIGS.extend(make_aft_configs())
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")

@@ -76,6 +76,12 @@ def save_state(
         norm_stats = data_config.norm_stats
         if norm_stats is not None and data_config.asset_id is not None:
             _normalize.save(directory / data_config.asset_id, norm_stats)
+            if data_config.aft_enabled:
+                for source, name in ((data_config.aft_manifest_path, 'manifest.json'),
+                                     (data_config.aft_edges_path, 'adjacency.json')):
+                    if source is None:
+                        raise ValueError('AFT checkpoint requires audited manifest and adjacency')
+                    (directory / data_config.asset_id / name).write_bytes(epath.Path(source).read_bytes())
 
     # Split params that can be used for inference into a separate item.
     with at.disable_typechecking():

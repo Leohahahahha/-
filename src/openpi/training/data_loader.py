@@ -166,6 +166,10 @@ def create_torch_dataset(
         # Avoid materializing depth/wrench tensors on every action-chunk query.
         dataset.hf_dataset = dataset.hf_dataset.select_columns(list(data_config.columns))
 
+    if data_config.aft_enabled:
+        from openpi.training.aft_data import AFTDataset
+        dataset = AFTDataset(dataset, data_config, action_horizon)
+
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 
@@ -183,12 +187,18 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
             )
         norm_stats = data_config.norm_stats
 
+    normalization = [_transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm)]
+    if data_config.aft_enabled:
+        from openpi.policies.aft_policy import NormalizeAFTCommon, NormalizeSensors
+        normalization = [] if skip_norm_stats else [
+            NormalizeAFTCommon(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            NormalizeSensors(norm_stats)]
     return TransformedDataset(
         dataset,
         [
             *data_config.repack_transforms.inputs,
             *data_config.data_transforms.inputs,
-            _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *normalization,
             *data_config.model_transforms.inputs,
         ],
     )
@@ -458,4 +468,8 @@ class DataLoaderImpl(DataLoader):
 
     def __iter__(self):
         for batch in self._data_loader:
-            yield _model.Observation.from_dict(batch), batch["actions"]
+            if self._data_config.aft_enabled:
+                from openpi.models.aft_types import AFTTargets
+                yield _model.Observation.from_dict(batch), AFTTargets.from_dict(batch)
+            else:
+                yield _model.Observation.from_dict(batch), batch["actions"]

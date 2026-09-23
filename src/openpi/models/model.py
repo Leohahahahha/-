@@ -102,6 +102,9 @@ class Observation(Generic[ArrayT]):
     # Encoder-prefix tactile history, such as Tabero 9-frame marker motion after reshape: [*b, n, e].
     # Used only when the corresponding tactile stream is provided.
     tactile_prefix: at.Float[ArrayT, "*b n_prefix e_prefix"] | None = None
+    # AFT-only clean wrench history; future supervision is never an Observation field.
+    force_history: at.Float[ArrayT, "*b n_force 6"] | None = None
+    force_history_mask: at.Bool[ArrayT, "*b n_force"] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
@@ -133,6 +136,8 @@ class Observation(Generic[ArrayT]):
             state=data["state"],
             tactile_suffix=data.get("tactile_suffix"),
             tactile_prefix=data.get("tactile_prefix"),
+            force_history=data.get("force_history"),
+            force_history_mask=data.get("force_history_mask"),
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
@@ -225,6 +230,8 @@ def preprocess_observation(
         state=state,
         tactile_suffix=tactile_suffix,
         tactile_prefix=tactile_prefix,
+        force_history=observation.force_history,
+        force_history_mask=observation.force_history_mask,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,

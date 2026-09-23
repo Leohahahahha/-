@@ -48,6 +48,13 @@ def create_trained_policy(
     """
     repack_transforms = repack_transforms or transforms.Group()
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))
+    from openpi.models.aft_config import AFTConfig
+    if isinstance(train_config.model, AFTConfig):
+        if norm_stats is not None or pytorch_device is not None:
+            raise ValueError('AFT uses audited checkpoint statistics and the JAX backend only')
+        from openpi.policies.aft_policy import create_aft_policy
+        return create_aft_policy(train_config, checkpoint_dir, repack_transforms=repack_transforms,
+                                 sample_kwargs=sample_kwargs, default_prompt=default_prompt)
 
     # Check if this is a PyTorch model by looking for model.safetensors
     weight_path = os.path.join(checkpoint_dir, "model.safetensors")
