@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import flax.nnx as nnx
 
 from openpi.training import config
+from openpi.models.aft_config import AFTConfig
 
 
 def test_eight_registered_configs_and_sensor_precision():
@@ -52,3 +53,35 @@ def test_lora_freezes_pretrained_vision_not_new_experts():
     assert c.freeze_filter(("PaliGemma", "img", "Transformer", "kernel"), leaf)
     assert not c.freeze_filter(("PaliGemma", "llm", "layers", "mlp_2", "gating_einsum"), leaf)
     assert not c.freeze_filter(("tactile_prefix_encoder", "out_proj", "kernel"), leaf)
+
+
+def test_whiteboard_v2_aft_full_30k_config():
+    name = "aft_pi0_whiteboard_20260922_v2_next_state_full_30k"
+    c = config.get_config(name)
+    assert isinstance(c.model, AFTConfig)
+    assert (c.model.pi05, c.model.action_horizon, c.model.force_history_frames) == (False, 50, 8)
+    assert c.data.base_config.root == "/data/yanghaojun/datasets/whiteboard_20260922_v2_tabero_next_state_filtered"
+    assert c.data.base_config.episodes == tuple(range(1, 39))
+    assert c.data.base_config.validation_episodes == (0,)
+    assert c.data.base_config.aft_action_state_step_offset == 1
+    assert c.data.base_config.prompt_from_task
+    assert c.weight_loader.backbone_params_path.endswith("/pi0_lora_tacfield_tabero/49999/params")
+    assert c.weight_loader.tactile_params_path == c.weight_loader.backbone_params_path
+    assert c.freeze_filter is nnx.Nothing
+    assert (c.batch_size, c.fsdp_devices, c.num_workers, c.seed) == (2, 2, 4, 42)
+    assert (c.num_train_steps, c.save_interval, c.keep_period) == (30_000, 6_000, 6_000)
+    assert (c.eval_interval, c.eval_num_batches) == (1_000, 174)
+    assert (c.lr_schedule.warmup_steps, c.lr_schedule.peak_lr, c.lr_schedule.decay_lr) == (500, 2e-5, 2e-6)
+    assert c.lr_schedule.decay_steps == 30_000
+    assert c.optimizer.moment_dtype == c.parameter_dtype_policy.gradient_dtype == "float32"
+    assert (c.optimizer.b1, c.optimizer.b2, c.optimizer.eps, c.optimizer.clip_gradient_norm) == (0.9, 0.95, 1e-8, 1.0)
+    assert (c.wandb_enabled, c.wandb_log_images, c.ema_decay) == (True, False, None)
+    assert c.policy_metadata["task_prompt"] == (
+        "Pick up the yellow whiteboard eraser and erase the X-shaped mark on the whiteboard."
+    )
+    assert str(c.assets_dirs) == f"/data/yanghaojun/outputs/assets/{name}"
+    assert c.checkpoint_base_dir == "/data/yanghaojun/outputs/checkpoints"
+    for backbone in ("pi0", "pi05"):
+        for dataset in ("next_state", "sent_command"):
+            for tuning in ("full", "lora"):
+                assert config.get_config(f"aft_{backbone}_{dataset}_{tuning}").name

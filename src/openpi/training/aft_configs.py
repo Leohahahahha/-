@@ -1,4 +1,6 @@
-"""Eight explicit AFT experiment configurations; import registration at config end."""
+"""AFT experiment configurations; import registration at config end."""
+
+import dataclasses
 
 import flax.nnx as nnx
 
@@ -9,7 +11,10 @@ from openpi.training import optimizer, weight_loaders
 def make_aft_configs():
     from openpi.training import config as c
 
-    tabero = "/data/yanghaojun/checkpoints/tabero-pretrained/checkpoints/pi0_lora_tacfield_tabero/pi0_lora_tacfield_tabero/49999/params"
+    tabero = (
+        "/data/yanghaojun/checkpoints/tabero-pretrained/checkpoints/pi0_lora_tacfield_tabero/"
+        "pi0_lora_tacfield_tabero/49999/params"
+    )
     policy = c.ParameterDtypePolicy(
         name="aft_mixed_fp32_sensors",
         default_trainable_dtype="bfloat16",
@@ -106,4 +111,39 @@ def make_aft_configs():
                         ),
                     )
                 )
+    base = next(config for config in result if config.name == "aft_pi0_next_state_full")
+    name = "aft_pi0_whiteboard_20260922_v2_next_state_full_30k"
+    result.append(
+        dataclasses.replace(
+            base,
+            name=name,
+            data=dataclasses.replace(
+                base.data,
+                repo_id="local/whiteboard_20260922_v2_tabero_next_state_filtered",
+                base_config=dataclasses.replace(
+                    base.data.base_config,
+                    root="/data/yanghaojun/datasets/whiteboard_20260922_v2_tabero_next_state_filtered",
+                    episodes=tuple(range(1, 39)),
+                    validation_episodes=(0,),
+                ),
+            ),
+            batch_size=2,
+            fsdp_devices=2,
+            num_workers=4,
+            num_train_steps=30_000,
+            save_interval=6_000,
+            keep_period=6_000,
+            eval_interval=1_000,
+            eval_num_batches=174,
+            lr_schedule=optimizer.CosineDecaySchedule(
+                warmup_steps=500, peak_lr=2e-5, decay_steps=30_000, decay_lr=2e-6
+            ),
+            seed=42,
+            policy_metadata={
+                **base.policy_metadata,
+                "dataset_version": "whiteboard_20260922_v2_tabero_next_state_filtered",
+                "task_prompt": "Pick up the yellow whiteboard eraser and erase the X-shaped mark on the whiteboard.",
+            },
+        )
+    )
     return result
