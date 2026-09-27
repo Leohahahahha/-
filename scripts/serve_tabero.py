@@ -9,6 +9,64 @@ import logging
 from pathlib import Path
 
 
+def create_aft_served_policy(config, checkpoint: Path, manifest: dict, conversion_path: Path, denoise_steps: int):
+    """Serve AFT using checkpoint-local assets; never construct a training dataset."""
+    from openpi.policies import policy_config
+    from openpi.shared import normalize
+    from openpi.training.aft_assets import file_hash
+
+    if manifest.get("config") != config.name:
+        raise ValueError("AFT checkpoint config mismatch")
+    if file_hash(conversion_path) != manifest.get("conversion_sha256"):
+        raise ValueError("AFT checkpoint conversion hash mismatch")
+    conversion = json.loads(conversion_path.read_text())
+    if conversion.get("output_contract") != "tabero_action_only_lerobot_v2.1":
+        raise ValueError("AFT conversion contract mismatch")
+    assets = checkpoint / "assets/aft"
+    stats = normalize.load(assets)
+    for key, width in (("state", 7), ("actions", 7), ("tactile_prefix", 396), ("shear", 396), ("wrench", 6)):
+        value = stats.get(key)
+        if value is None or value.mean.shape != (width,) or value.std.shape != (width,):
+            raise ValueError(f"AFT {key} normalization must be {width}D")
+    prompt = (config.policy_metadata or {}).get("task_prompt")
+    if not prompt:
+        raise ValueError("AFT task prompt missing from config")
+    metadata = {
+        "architecture": "aft",
+        "prediction_layout": "separate_aft_actions_shear_wrench",
+        "deployment_protocol": "tabero_fr3_absolute_v1",
+        "action_representation": "absolute_xyz_axis_angle_single_finger_m",
+        "action_dim": 7,
+        "dataset_fps": 10,
+        "use_tactile": True,
+        "predicts_tactile": True,
+        "predicts_wrench": True,
+        "tactile_input": "rolling_9x198x2_marker_coordinates_left_then_right",
+        "tactile_marker_shape": [9, 198, 2],
+        "tactile_marker_dtype": "float32",
+        "tactile_marker_layout": "reference_then_8_history_frames_left_then_right",
+        "tactile_shear_shape": [config.model.action_horizon, 198, 2],
+        "force_history_frames": config.model.force_history_frames,
+        "wrist_wrench_shape": [config.model.action_horizon, 6],
+        "wrist_wrench_dim": 6,
+        "wrist_wrench_order": ["force_x", "force_y", "force_z", "torque_x", "torque_y", "torque_z"],
+        "wrist_wrench_units": ["N", "N", "N", "N_m", "N_m", "N_m"],
+        "wrist_wrench_frame": "K",
+        "task_prompt": prompt,
+        "action_horizon": config.model.action_horizon,
+        "config": config.name,
+        "checkpoint": str(checkpoint),
+        "asset_id": "aft",
+        "norm_stats_sha256": file_hash(assets / "norm_stats.json"),
+        "conversion_sha256": file_hash(conversion_path),
+    }
+    validate_tactile_contract(metadata, conversion, use_tactile=True)
+    policy = policy_config.create_trained_policy(
+        config, checkpoint, sample_kwargs={"num_steps": denoise_steps}, strict_params=True
+    )
+    return policy, metadata
+
+
 def validate_tactile_contract(policy_metadata, conversion, use_tactile):
     if not use_tactile:
         return
@@ -33,11 +91,16 @@ def validate_tactile_contract(policy_metadata, conversion, use_tactile):
 def load_policy(config_name, checkpoint, conversion_path, denoise_steps):
     from openpi.policies import policy_config
     from openpi.training import config as configs
+    from openpi.models.aft_config import AFTConfig
+    from openpi.training.aft_assets import validate_assets
 
     checkpoint = checkpoint.resolve(strict=True)
     if not (checkpoint / "params").is_dir():
         raise ValueError("Pass the complete JAX step directory containing params/ and assets/, not params/ itself")
     config = configs.get_config(config_name)
+    if isinstance(config.model, AFTConfig):
+        manifest = validate_assets(checkpoint / "assets/aft", config.model, config.data.base_config, check_source=False)
+        return create_aft_served_policy(config, checkpoint, manifest, Path(conversion_path), denoise_steps)
     policy_metadata = config.policy_metadata or {}
     predicts_wrench = bool(policy_metadata.get("predicts_wrench", False))
     action_only_contract = (

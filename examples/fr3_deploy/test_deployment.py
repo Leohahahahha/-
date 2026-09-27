@@ -338,6 +338,47 @@ def test_server_contract_rejects_wrong_modalities_or_conversion():
         core.validate_metadata({**force, "wrist_wrench_dim": 3}, use_tactile=True, conversion_sha256="abc")
 
 
+def test_aft_metadata_requires_separate_heads_k_wrench_and_matching_prompt():
+    prompt = "Pick up the yellow whiteboard eraser and erase the X-shaped mark on the whiteboard."
+    meta = {
+        "architecture": "aft",
+        "deployment_protocol": core.PROTOCOL,
+        "action_representation": "absolute_xyz_axis_angle_single_finger_m",
+        "action_dim": 7,
+        "dataset_fps": 10,
+        "use_tactile": True,
+        "conversion_sha256": "abc",
+        "task_prompt": prompt,
+        "action_horizon": 50,
+        "prediction_layout": "separate_aft_actions_shear_wrench",
+        "predicts_wrench": True,
+        "predicts_tactile": True,
+        "tactile_input": core.TACTILE_INPUT,
+        "tactile_marker_shape": list(core.TACTILE_MARKER_SHAPE),
+        "tactile_marker_dtype": "float32",
+        "tactile_marker_layout": core.TACTILE_MARKER_LAYOUT,
+        "tactile_shear_shape": [50, 198, 2],
+        "force_history_frames": 8,
+        "wrist_wrench_shape": [50, 6],
+        "wrist_wrench_dim": 6,
+        "wrist_wrench_order": ["force_x", "force_y", "force_z", "torque_x", "torque_y", "torque_z"],
+        "wrist_wrench_units": ["N", "N", "N", "N_m", "N_m", "N_m"],
+        "wrist_wrench_frame": "K",
+    }
+    core.validate_metadata(meta, use_tactile=True, conversion_sha256="abc", prompt=prompt)
+    with pytest.raises(ValueError, match="prompt"):
+        core.validate_metadata(meta, use_tactile=True, conversion_sha256="abc", prompt="old assembly text")
+    with pytest.raises(ValueError, match="prediction_layout"):
+        core.validate_metadata({**meta, "prediction_layout": "7d_action_then_6d_wrist_wrench"},
+                               use_tactile=True, conversion_sha256="abc", prompt=prompt)
+    with pytest.raises(ValueError, match="wrist_wrench_frame"):
+        core.validate_metadata({**meta, "wrist_wrench_frame": "O"},
+                               use_tactile=True, conversion_sha256="abc", prompt=prompt)
+    with pytest.raises(ValueError, match="use_tactile"):
+        core.validate_metadata({**meta, "use_tactile": False},
+                               use_tactile=False, conversion_sha256="abc", prompt=prompt)
+
+
 def test_live_config_uses_stream_specific_qos_and_url_overrides():
     config = run.load_config(ROOT / "config.json")
     assert config["actions_per_inference"] == 1

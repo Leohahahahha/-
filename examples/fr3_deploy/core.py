@@ -183,7 +183,7 @@ def validate_conversion(conversion):
         raise ValueError("Unsupported gripper convention")
 
 
-def validate_metadata(metadata, *, use_tactile, conversion_sha256):
+def validate_metadata(metadata, *, use_tactile, conversion_sha256, prompt=None):
     expected = {
         "deployment_protocol": PROTOCOL,
         "action_representation": "absolute_xyz_axis_angle_single_finger_m",
@@ -204,6 +204,28 @@ def validate_metadata(metadata, *, use_tactile, conversion_sha256):
     for key, value in expected.items():
         if metadata.get(key) != value:
             raise ValueError(f"Server metadata mismatch: {key}={metadata.get(key)!r}, expected {value!r}")
+    if metadata.get("architecture") == "aft":
+        if not use_tactile:
+            raise ValueError("AFT server metadata requires use_tactile=True")
+        if not prompt or metadata.get("task_prompt") != prompt:
+            raise ValueError("AFT server metadata mismatch: task_prompt")
+        aft_expected = {
+            "prediction_layout": "separate_aft_actions_shear_wrench",
+            "action_horizon": 50,
+            "predicts_wrench": True,
+            "predicts_tactile": True,
+            "tactile_shear_shape": [50, 198, 2],
+            "force_history_frames": 8,
+            "wrist_wrench_shape": [50, 6],
+            "wrist_wrench_dim": 6,
+            "wrist_wrench_order": ["force_x", "force_y", "force_z", "torque_x", "torque_y", "torque_z"],
+            "wrist_wrench_units": ["N", "N", "N", "N_m", "N_m", "N_m"],
+            "wrist_wrench_frame": "K",
+        }
+        for key, value in aft_expected.items():
+            if metadata.get(key) != value:
+                raise ValueError(f"AFT server metadata mismatch: {key}={metadata.get(key)!r}, expected {value!r}")
+        return
     predicts_wrench = metadata.get("predicts_wrench")
     if not isinstance(predicts_wrench, bool):
         raise ValueError("Server metadata mismatch: predicts_wrench must be bool")
