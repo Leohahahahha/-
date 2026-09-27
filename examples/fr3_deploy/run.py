@@ -365,6 +365,7 @@ def main():
                 policy.metadata,
                 use_tactile=not args.no_tactile,
                 conversion_sha256=hashlib.sha256(conversion_bytes).hexdigest(),
+                prompt=config["prompt"],
             )
             if config["actions_per_inference"] > policy.metadata["action_horizon"]:
                 raise ValueError("actions_per_inference exceeds the server action_horizon")
@@ -385,7 +386,12 @@ def main():
                 + "\n"
             )
             log.flush()
-            source = LiveObservations(config, conversion, use_tactile=not args.no_tactile)
+            source = LiveObservations(
+                config,
+                conversion,
+                use_tactile=not args.no_tactile,
+                use_force=policy.metadata.get("architecture") == "aft",
+            )
             robot = RobotHttp(config["robot_url"], config["http_timeout_sec"])
             summary = control_loop(
                 source, policy, robot, config, execute=args.execute, duration=args.seconds, stopped=stopped, log=log

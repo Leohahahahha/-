@@ -5,7 +5,9 @@ import threading
 import time
 
 from core import MarkerHistory
+from core import ForceHistory
 from core import Sample
+from core import add_aft_force_input
 from core import crop_front
 from core import decode_image
 from core import decode_packed_shear
@@ -26,10 +28,11 @@ from transport import RobotHttp
 
 
 class LiveObservations:
-    def __init__(self, config, conversion, *, use_tactile):
+    def __init__(self, config, conversion, *, use_tactile, use_force=False):
         self.config = config
         self.conversion = conversion
         self.use_tactile = use_tactile
+        self.use_force = use_force
         self.lock = threading.Lock()
         self.stopped = threading.Event()
         self.frames = {}
@@ -41,6 +44,7 @@ class LiveObservations:
         self.armed = False
         self.enable_lost = False
         self.history = MarkerHistory(conversion["marker_field"]["shear_scale"])
+        self.force_history = ForceHistory() if use_force else None
         self.reader = RobotHttp(config["robot_url"], config["http_timeout_sec"])
         self.node = Node("tabero_fr3_observations")
         self.subscriptions = []
@@ -139,9 +143,15 @@ class LiveObservations:
         while not self.stopped.is_set():
             start = time.monotonic()
             try:
-                state, stamp = self.reader.read_state(self.config["max_sensor_age_sec"])
-                with self.lock:
-                    self.frames["state"] = (state, stamp)
+                if self.use_force:
+                    state, wrench, stamp = self.reader.read_state_with_wrench(self.config["max_sensor_age_sec"])
+                    with self.lock:
+                        self.frames["state"] = (state, stamp)
+                        self.frames["force"] = (wrench, stamp)
+                else:
+                    state, stamp = self.reader.read_state(self.config["max_sensor_age_sec"])
+                    with self.lock:
+                        self.frames["state"] = (state, stamp)
             except Exception as exc:
                 with self.lock:
                     self.fatal = f"State reader: {exc}"
@@ -157,10 +167,16 @@ class LiveObservations:
                 # A gap resets temporal history instead of pretending old frames are 100 ms apart.
                 if last_tick is not None and now - last_tick > 0.15:
                     self.history.frames.clear()
+                    if self.force_history is not None:
+                        self.force_history.clear()
                 last_tick = now
                 with self.lock:
                     frames = self.frames.copy()
-                keys = ("front", "wrist", "state", *(("left", "right") if self.use_tactile else ()))
+                keys = (
+                    "front", "wrist", "state",
+                    *(("left", "right") if self.use_tactile else ()),
+                    *(("force",) if self.use_force else ()),
+                )
                 stamps = sensor_stamps(frames, keys)
                 validate_sensor_timing(
                     stamps,
@@ -180,11 +196,15 @@ class LiveObservations:
                 if self.use_tactile:
                     marker = self.history.append(frames["left"][0], frames["right"][0])
                     data["tactile_marker_motion"] = validate_tactile_marker_motion(marker)
+                if self.use_force:
+                    data = add_aft_force_input(data, self.force_history, frames["force"][0], frames["force"][1])
                 sample = Sample(data, now, min(stamps.values()))
                 with self.lock:
                     self.sample, self.problem = sample, None
             except Exception as exc:
                 self.history.frames.clear()
+                if self.force_history is not None:
+                    self.force_history.clear()
                 with self.lock:
                     self.sample, self.problem = None, str(exc)
             next_tick += 0.1

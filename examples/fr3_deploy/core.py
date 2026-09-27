@@ -44,6 +44,53 @@ def state_from_http(payload):
     return pose_to_state(payload["pose"], float(payload["gripper_width"]))
 
 
+def wrench_from_http(payload):
+    """Read Franka K_F_ext_hat_K only; O-frame external_wrench_base is not interchangeable."""
+    try:
+        force = finite(payload["force"], (3,), "force")
+        torque = finite(payload["torque"], (3,), "torque")
+    except (KeyError, TypeError) as exc:
+        raise ValueError("K-frame force and torque fields are required") from exc
+    wrench = np.concatenate([force, torque]).astype(np.float32)
+    if not np.isfinite(wrench).all():
+        raise ValueError("K-frame force and torque must be finite float32")
+    return wrench
+
+
+class ForceHistory:
+    """Eight sampled 10 Hz K-frame wrenches, without inventing valid prehistory."""
+
+    def __init__(self):
+        self.frames = deque(maxlen=8)
+        self.last_stamp = None
+
+    def clear(self):
+        self.frames.clear()
+        self.last_stamp = None
+
+    def append(self, wrench, stamp):
+        wrench = finite(wrench, (6,), "K-frame wrench").astype(np.float32)
+        stamp = float(stamp)
+        if not np.isfinite(stamp) or stamp <= 0:
+            raise ValueError("Force history stamp must be finite and positive")
+        if self.last_stamp is not None:
+            if stamp <= self.last_stamp:
+                raise ValueError("Force history stamp must increase")
+            if stamp - self.last_stamp > 0.15:
+                self.clear()
+        self.last_stamp = stamp
+        self.frames.append(wrench.copy())
+        missing = 8 - len(self.frames)
+        padded = [self.frames[0]] * missing + list(self.frames)
+        mask = np.array([False] * missing + [True] * len(self.frames), dtype=bool)
+        return np.stack(padded).astype(np.float32), mask
+
+
+def add_aft_force_input(data, history, wrench, stamp):
+    values, valid = history.append(wrench, stamp)
+    return {**data, "force_history": values, "force_history_mask": valid}
+
+
 def marker_reference_grid():
     y = np.rint(np.linspace(0, 239, 9)).astype(int)
     x = np.rint(np.linspace(0, 319, 11)).astype(int)

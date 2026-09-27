@@ -37,6 +37,49 @@ def test_http_units_quaternion_and_gripper_roundtrip():
         core.state_from_http({"pose": pose, "gripper_pos": 0.7})
 
 
+def test_k_frame_force_history_contract():
+    payload = {
+        "force": [0.45588582436461367, 0.9326669415787794, -2.6886945581867443],
+        "torque": [0.09000628468673744, 0.08083657308022849, -0.07423050067490126],
+        "external_wrench_base": [-0.3258357395096694, -0.986504384247251, 2.688385780856734,
+                                  0.41800679810636204, -1.0822985090270107, -0.22894085459389402],
+    }
+    wrench = core.wrench_from_http(payload)
+    assert wrench.shape == (6,) and wrench.dtype == np.float32
+    np.testing.assert_allclose(wrench, payload["force"] + payload["torque"], rtol=1e-6)
+    history = core.ForceHistory()
+    values, valid = history.append(wrench, 10.0)
+    assert values.shape == (8, 6) and values.dtype == np.float32
+    np.testing.assert_array_equal(values, np.repeat(wrench[None], 8, axis=0))
+    np.testing.assert_array_equal(valid, [False] * 7 + [True])
+    next_wrench = wrench + 1
+    values, valid = history.append(next_wrench, 10.1)
+    np.testing.assert_array_equal(values[-2:], [wrench, next_wrench])
+    np.testing.assert_array_equal(valid, [False] * 6 + [True, True])
+    with pytest.raises(ValueError, match="stamp"):
+        history.append(wrench, 10.1)
+    values, valid = history.append(wrench + 2, 10.3)
+    np.testing.assert_array_equal(values, np.repeat((wrench + 2)[None], 8, axis=0))
+    np.testing.assert_array_equal(valid, [False] * 7 + [True])
+    for bad in ({"force": [1, 2], "torque": [0, 0, 0]},
+                {"force": [1, 2, np.nan], "torque": [0, 0, 0]},
+                {"force": [1, 2, 3]}):
+        with pytest.raises(ValueError, match="force|torque"):
+            core.wrench_from_http(bad)
+
+
+def test_aft_force_sample_adds_only_history_fields():
+    original = {"state": state(), "prompt": "whiteboard"}
+    history = core.ForceHistory()
+    result = core.add_aft_force_input(original, history, np.arange(6, dtype=np.float32), 10.0)
+    assert set(result) == set(original) | {"force_history", "force_history_mask"}
+    assert set(original) == {"state", "prompt"}
+    assert result["force_history"].shape == (8, 6)
+    assert result["force_history"].dtype == np.float32
+    assert result["force_history_mask"].shape == (8,)
+    assert result["force_history_mask"].dtype == bool
+
+
 @pytest.mark.parametrize("invalid", [np.nan, -0.001, 0.043])
 def test_bad_gripper_rejected(invalid):
     action = state()
@@ -626,6 +669,37 @@ def test_http_rejects_stale_measured_stamp(monkeypatch):
     )
     with pytest.raises(ValueError, match="stale"):
         robot.read_state(0.25)
+    robot.close()
+
+
+def test_http_state_and_k_wrench_share_one_getstate_acquisition(monkeypatch):
+    robot = transport.RobotHttp("http://unused.invalid")
+    pose, width = core.action_to_http(state())
+    stamp = transport.time.time()
+    payload = {
+        "pose": pose,
+        "gripper_width": width,
+        "stamp": {"to_sec": stamp},
+        "force": [1.0, 2.0, 3.0],
+        "torque": [0.1, 0.2, 0.3],
+        "external_wrench_base": [9] * 6,
+    }
+    routes = []
+
+    def post(route):
+        routes.append(route)
+        return payload
+
+    monkeypatch.setattr(robot, "post", post)
+    measured, wrench, captured = robot.read_state_with_wrench(0.25)
+    assert routes == ["/getstate"]
+    np.testing.assert_allclose(measured, state(), atol=1e-6)
+    np.testing.assert_allclose(wrench, [1, 2, 3, 0.1, 0.2, 0.3])
+    assert captured == stamp
+    payload.pop("force")
+    legacy, legacy_stamp = robot.read_state(0.25)
+    np.testing.assert_allclose(legacy, measured)
+    assert legacy_stamp == stamp
     robot.close()
 
 

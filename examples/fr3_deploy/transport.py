@@ -5,6 +5,7 @@ import time
 from core import Chunk
 from core import state_from_http
 from core import validate_tactile_marker_motion
+from core import wrench_from_http
 import numpy as np
 from openpi_client import msgpack_numpy
 import requests
@@ -28,7 +29,7 @@ class RobotHttp:
             return result
         return response.text
 
-    def read_state(self, max_age):
+    def _read_measured(self, max_age):
         start = time.monotonic()
         payload = self.post("/getstate")
         state = state_from_http(payload)
@@ -37,7 +38,15 @@ class RobotHttp:
         age = time.time() - stamp
         if not np.isfinite(stamp) or not -0.05 <= age <= max_age or time.monotonic() - start > max_age:
             raise ValueError(f"Robot state timestamp/latency is stale: age={age:.3f}s")
+        return payload, state, stamp
+
+    def read_state(self, max_age):
+        _, state, stamp = self._read_measured(max_age)
         return state, stamp
+
+    def read_state_with_wrench(self, max_age):
+        payload, state, stamp = self._read_measured(max_age)
+        return state, wrench_from_http(payload), stamp
 
     def command_pose(self, pose):
         self.post("/pose", {"arr": np.asarray(pose).tolist()})
