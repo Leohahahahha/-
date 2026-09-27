@@ -9,7 +9,7 @@ import pathlib
 from openpi import transforms
 from openpi.policies.aft_policy import fit_sensor_stats
 from openpi.shared import normalize
-from openpi.training.aft_data import audit_edges, build_episode_windows, read_episode
+from openpi.training.aft_data import audit_episode_edges, build_episode_windows, read_episode, source_mapping_path
 from openpi.training.aft_assets import model_contract
 
 
@@ -57,7 +57,13 @@ def main(config, output_dir, edges_json=None):
     supplied = json.loads(pathlib.Path(edges_json).read_text()) if edges_json else None
     # Audit both splits before producing anything that could be mistaken for ready assets.
     all_ids = (*data.episodes, *data.validation_episodes)
-    edges = {ep: audit_edges(conversion, ep, len(read_episode(str(root), ep)["state"]), supplied) for ep in all_ids}
+    edges = {
+        ep: audit_episode_edges(root, conversion, ep, len(read_episode(str(root), ep)["state"]), supplied)
+        for ep in all_ids
+    }
+    true_edges = sum(int(e.sum()) for e in edges.values())
+    false_edges = sum(int((~e).sum()) for e in edges.values())
+    print(f"Audited {len(edges)} episodes: {true_edges} contiguous and {false_edges} broken source edges")
     train = {ep: read_episode(str(root), ep) for ep in data.episodes}
     stats = collect_statistics(
         train, edges, horizon=c.model.action_horizon, action_offset=data.aft_action_state_step_offset
@@ -80,6 +86,11 @@ def main(config, output_dir, edges_json=None):
         initialization=dict(backbone=c.weight_loader.backbone_params_path, tactile=c.weight_loader.tactile_params_path),
         model_contract=model_contract(c.model),
         adjacency_sha256=hashlib.sha256((output / "adjacency.json").read_bytes()).hexdigest(),
+        source_mapping_sha256={
+            str(ep): hashlib.sha256(source_mapping_path(root, ep).read_bytes()).hexdigest()
+            for ep in all_ids
+            if source_mapping_path(root, ep).exists()
+        },
     )
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
     print(f"AFT train-only assets saved: {output}; training was not started.")

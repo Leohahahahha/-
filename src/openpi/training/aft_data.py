@@ -8,6 +8,7 @@ import numpy as np
 import json
 import pathlib
 import functools
+import math
 
 from openpi.models.aft_types import AFTTargets
 
@@ -31,6 +32,88 @@ def audit_edges(conversion, episode, length, supplied=None):
     if report.get("missing_candidate_steps") == 0:
         return np.ones(length - 1, bool)
     raise ValueError(f"episode {episode}: compact gap positions unknown; require audited adjacency JSON")
+
+
+def source_mapping_path(root, episode):
+    return pathlib.Path(root) / "meta/source_mapping" / f"episode_{episode:06d}.json"
+
+
+def _is_contiguous(current, following):
+    """Require both source-frame adjacency and the action's actual next observation."""
+    return (
+        following["source_row_index"] == current["source_row_index"] + 1
+        and following["source_frame_index"] == current["source_frame_index"] + 1
+        and current["action_source_row_index"] == following["source_row_index"]
+        and current["action_source_frame_index"] == following["source_frame_index"]
+        and math.isclose(following["source_timestamp"] - current["source_timestamp"], 0.1, abs_tol=0.005)
+        and math.isclose(current["action_source_timestamp"], following["source_timestamp"], abs_tol=0.005)
+    )
+
+
+def audit_episode_edges(root, conversion, episode, length, supplied=None):
+    """Audit output adjacency against original source provenance, not compact output time."""
+    mapping_path = source_mapping_path(root, episode)
+    report_has_removed_rows = any(
+        r.get("output_episode_index") == episode and r.get("removed_supervised_samples", 0) > 0
+        for r in conversion.get("timing_reports", [])
+    )
+    needs_mapping = (
+        report_has_removed_rows or bool(conversion.get("frame_exclusion")) or conversion.get("version", 0) >= 4
+    )
+    if not mapping_path.exists():
+        if needs_mapping:
+            raise ValueError(f"episode {episode}: source mapping is required for filtered data")
+        return audit_edges(conversion, episode, length, supplied)
+
+    reports = [r for r in conversion.get("timing_reports", []) if r.get("output_episode_index") == episode]
+    if len(reports) != 1:
+        raise ValueError(f"episode {episode}: missing or duplicate conversion timing report")
+    report = reports[0]
+    omitted_terminal = conversion.get("terminal_frame_policy") in (
+        "omit final source observation; use it only as the previous frame action target",
+        "final source observation omitted to keep rows identical to next-state exports",
+    )
+    if report.get("frames") != length + int(omitted_terminal) + report.get("removed_supervised_samples", 0):
+        raise ValueError(f"episode {episode}: conversion timing report frames mismatch")
+    mapping = json.loads(mapping_path.read_text())
+    rows = mapping.get("rows")
+    if mapping.get("source_episode_index") != report.get("source_episode_index") or not isinstance(rows, list):
+        raise ValueError(f"episode {episode}: source mapping does not match timing report")
+    if len(rows) != length:
+        raise ValueError(f"episode {episode}: source mapping length mismatch")
+    required_ints = (
+        "output_frame_index",
+        "source_row_index",
+        "source_frame_index",
+        "action_source_row_index",
+        "action_source_frame_index",
+    )
+    required_times = ("source_timestamp", "action_source_timestamp")
+    for i, row in enumerate(rows):
+        if any(type(row.get(k)) is not int or row[k] < 0 for k in required_ints):
+            raise ValueError(f"episode {episode}: invalid source/action_source index at row {i}")
+        if row["output_frame_index"] != i:
+            raise ValueError(f"episode {episode}: output_frame_index is not dense at row {i}")
+        if any(not isinstance(row.get(k), (float, int)) or not math.isfinite(row[k]) for k in required_times):
+            raise ValueError(f"episode {episode}: invalid source/action_source timestamp at row {i}")
+        if (
+            row["action_source_row_index"] <= row["source_row_index"]
+            or row["action_source_frame_index"] <= row["source_frame_index"]
+            or row["action_source_timestamp"] <= row["source_timestamp"]
+        ):
+            raise ValueError(f"episode {episode}: action_source must follow source row {i}")
+        if i and (
+            row["source_row_index"] <= rows[i - 1]["source_row_index"]
+            or row["source_frame_index"] <= rows[i - 1]["source_frame_index"]
+            or row["source_timestamp"] <= rows[i - 1]["source_timestamp"]
+        ):
+            raise ValueError(f"episode {episode}: source mapping must increase strictly")
+    edges = np.asarray([_is_contiguous(a, b) for a, b in zip(rows, rows[1:])], dtype=bool)
+    if supplied is not None and str(episode) in supplied:
+        provided = np.asarray(supplied[str(episode)])
+        if provided.shape != edges.shape or provided.dtype != bool or not np.array_equal(provided, edges):
+            raise ValueError(f"episode {episode}: supplied adjacency contradicts source mapping")
+    return edges
 
 
 @functools.lru_cache(maxsize=2)
@@ -67,7 +150,9 @@ class AFTDataset:
         for ep in data_config.episodes:
             rows = read_episode(data_config.root, ep)
             self.rows[ep] = rows
-            self.edges[ep] = audit_edges(self.conversion, ep, len(rows["state"]), self.supplied)
+            self.edges[ep] = audit_episode_edges(
+                data_config.root, self.conversion, ep, len(rows["state"]), self.supplied
+            )
             if data_config.aft_action_state_step_offset:
                 # Validate only known-contiguous transitions; compare physical SO(3), not rotvec branches.
                 from scipy.spatial.transform import Rotation

@@ -47,3 +47,32 @@ def test_assets_reject_wrong_model_or_split(tmp_path):
         )
     with pytest.raises(ValueError, match="split"):
         validate_assets(tmp_path, c.model, dataclasses.replace(c.data.base_config, episodes=(0,)), check_source=False)
+
+
+def test_assets_bind_filtered_source_mapping_hashes(tmp_path):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    c = fixture_assets(assets)
+    source = tmp_path / "dataset/meta"
+    (source / "source_mapping").mkdir(parents=True)
+    conversion = source / "tabero_conversion.json"
+    mapping = source / "source_mapping/episode_000000.json"
+    conversion.write_text('{"version": 4}')
+    mapping.write_text('{"rows": []}')
+    data = dataclasses.replace(c.data.base_config, root=str(source.parent), episodes=(0,), validation_episodes=())
+    manifest = json.loads((assets / "manifest.json").read_text())
+    manifest["source_root"] = str(source.parent)
+    manifest["train_episodes"] = [0]
+    manifest["validation_episodes"] = []
+    manifest["conversion_sha256"] = hashlib.sha256(conversion.read_bytes()).hexdigest()
+    manifest["source_mapping_sha256"] = {"0": hashlib.sha256(mapping.read_bytes()).hexdigest()}
+    (assets / "manifest.json").write_text(json.dumps(manifest))
+    validate_assets(assets, c.model, data, check_source=True)
+    mapping.write_text('{"rows": [1]}')
+    with pytest.raises(ValueError, match="mapping.*hash"):
+        validate_assets(assets, c.model, data, check_source=True)
+    mapping.write_text('{"rows": []}')
+    manifest.pop("source_mapping_sha256")
+    (assets / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="mapping"):
+        validate_assets(assets, c.model, data, check_source=True)

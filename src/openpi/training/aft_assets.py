@@ -52,4 +52,13 @@ def validate_assets(directory, model, data, *, check_source=True):
         source = pathlib.Path(data.root) / "meta/tabero_conversion.json"
         if file_hash(source) != manifest.get("conversion_sha256"):
             raise ValueError("AFT dataset conversion hash mismatch")
+        mapping_hashes = manifest.get("source_mapping_sha256", {})
+        conversion = json.loads(source.read_text())
+        if (conversion.get("version", 0) >= 4 or conversion.get("frame_exclusion")) and not mapping_hashes:
+            raise ValueError("AFT filtered source mapping hashes missing")
+        for episode in (*data.episodes, *data.validation_episodes):
+            if mapping_hashes:
+                mapping = pathlib.Path(data.root) / "meta/source_mapping" / f"episode_{episode:06d}.json"
+                if not mapping.exists() or file_hash(mapping) != mapping_hashes.get(str(episode)):
+                    raise ValueError(f"AFT source mapping hash mismatch for episode {episode}")
     return manifest
