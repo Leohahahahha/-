@@ -99,6 +99,22 @@ def test_aft_serving_rejects_conversion_manifest_and_stats_mismatch(tmp_path, mo
         serve_tabero.load_policy(NAME, checkpoint, conversion, 10)
 
 
+def test_diagnostic_configuration_rejects_legacy_and_advertises_aft():
+    from openpi.policies.aft_diagnostics import DiagnosticsOptions
+
+    class Policy:
+        def configure_diagnostics(self, options, *, output_dir=None, metadata=None):
+            self.options = options
+    policy = Policy()
+    with pytest.raises(ValueError, match="AFT"):
+        serve_tabero.configure_aft_diagnostics(policy, {}, DiagnosticsOptions())
+    metadata = {"architecture": "aft"}
+    serve_tabero.configure_aft_diagnostics(policy, metadata, DiagnosticsOptions(every=5, ablations=True))
+    assert metadata["diagnostics"]["schema"] == "aft_diagnostics_v1"
+    assert metadata["diagnostics"]["every"] == 5
+    assert metadata["diagnostics"]["ablations"] is True
+
+
 @pytest.mark.parametrize(
     ("name", "use_tactile", "predicts_wrench", "target_dim", "asset_id"),
     [

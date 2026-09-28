@@ -115,3 +115,68 @@ def test_synchronous_policy_returns_all_physical_modalities():
     assert result["actions"].shape == (50, 7)
     assert result["tactile_shear"].shape == (50, 198, 2)
     np.testing.assert_allclose(result["wrist_wrench"], 1.0)
+
+
+def test_opt_in_diagnostics_share_noise_and_do_not_mutate_inputs(tmp_path):
+    import flax.nnx as nnx
+    import jax.numpy as jnp
+    from openpi import transforms
+    from openpi.policies.aft_diagnostics import DiagnosticsOptions
+
+    class HistorySensitive(nnx.Module):
+        attention_depth = 2
+        def sample_predictions(self, rng, obs, num_steps=1):
+            a = jax.random.normal(rng, (1, 3, 32)) * 0.001
+            a = a.at[..., 0].add(jnp.mean(obs.tactile_prefix, axis=(1, 2))[:, None] * 0.001)
+            a = a.at[..., 1].add(jnp.mean(obs.force_history, axis=(1, 2))[:, None] * 0.002)
+            return dict(actions=a, shear=jnp.zeros((1, 3, 396)), wrench=jnp.zeros((1, 3, 6)))
+
+        def sample_attention(self, rng, obs, *, num_steps=1, denoise_step=-1, query_stride=1):
+            return dict(attention=jnp.ones((2, 1, 9, 1)), key_group_id=jnp.array([6]),
+                        key_valid=jnp.ones((1, 1), bool), query_stream_id=jnp.repeat(jnp.arange(3), 3),
+                        query_horizon_index=jnp.tile(jnp.arange(3), 3),
+                        key_camera_id=jnp.array([-1]), key_patch_index=jnp.array([-1]))
+
+    encode = transforms.compose([aft_policy.AFTInputs(model.ModelType.PI0),
+                                 aft_policy.NormalizeSensors(stats()), transforms.PadStatesAndActions(32)])
+    policy = aft_policy.AFTPolicy(HistorySensitive(), encode, aft_policy.AFTOutputs(stats()),
+                                 sample_kwargs={"num_steps": 1})
+    raw = sample()
+    raw.pop("targets")
+    raw["force_history"].fill(2.0)  # mean=1,std=2: normalized history is +0.5
+    before = raw["tactile_marker_motion"].copy()
+    normal = policy.infer(raw, seed=7)
+    assert "diagnostics" not in normal
+    with pytest.raises(ValueError, match="layer"):
+        policy.configure_diagnostics(DiagnosticsOptions(layers=(2,)))
+    policy.configure_diagnostics(DiagnosticsOptions(every=2, layers=(1,), ablations=True))
+    result = policy.infer(raw, seed=7)
+    np.testing.assert_array_equal(result["actions"], normal["actions"])
+    d = result["diagnostics"]
+    assert d["schema"] == "aft_diagnostics_v1"
+    assert d["attention"].shape == (1, 9, 1)
+    assert d["layer_indices"] == [1]
+    delta_t = d["ablations"]["mean_tactile_history"]
+    delta_f = d["ablations"]["mean_force_history"]
+    np.testing.assert_allclose(delta_f["position_delta_mm"], 1.0, atol=1e-5)
+    np.testing.assert_allclose(delta_f["actions"][:, 0], normal["actions"][:, 0])
+    np.testing.assert_allclose(delta_t["actions"][:, 1], normal["actions"][:, 1])
+    assert np.all(delta_t["position_delta_mm"] > 0)
+    np.testing.assert_array_equal(raw["tactile_marker_motion"], before)
+    skipped = policy.infer(raw, seed=7)
+    assert "diagnostics" not in skipped
+    # A regular file used as a directory triggers a real, controlled IO error.
+    blocked = tmp_path / "not_a_directory"
+    blocked.write_text("preserve me")
+    policy.configure_diagnostics(DiagnosticsOptions(), output_dir=blocked)
+    failed_capture = policy.infer(raw, seed=7)
+    np.testing.assert_array_equal(failed_capture["actions"], normal["actions"])
+    assert failed_capture["diagnostics"]["capture_status"] == "error"
+    assert blocked.read_text() == "preserve me"
+    policy.configure_diagnostics(DiagnosticsOptions(), output_dir=tmp_path / "captures",
+                                 metadata={"norm_stats_sha256": "verified-hash", "checkpoint": "unit/30000"})
+    saved = policy.infer(raw, seed=7)
+    from openpi.policies.aft_diagnostics import load_bundle
+    _, context = load_bundle(tmp_path / "captures" / saved["diagnostics"]["record_id"])
+    assert saved["diagnostics"]["capture_status"] == "saved"
+    assert context["policy_metadata"]["norm_stats_sha256"] == "verified-hash"

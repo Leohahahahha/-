@@ -166,6 +166,20 @@ def load_policy(config_name, checkpoint, conversion_path, denoise_steps):
     return policy, metadata
 
 
+def configure_aft_diagnostics(policy, metadata, options, output_dir=None):
+    """Optional explanation interface, not part of training/robot control."""
+    if metadata.get("architecture") != "aft":
+        raise ValueError("Attention diagnostics currently require an AFT checkpoint")
+    metadata["diagnostics"] = {
+        "schema": "aft_diagnostics_v1", "every": options.every,
+        "ablations": options.ablations, "denoise_step": options.denoise_step,
+        "query_stride": options.query_stride, "layers": list(options.layers),
+        "head_reduction": "mean", "extra_inference_cost": True,
+    }
+    policy.configure_diagnostics(options, output_dir=output_dir, metadata=metadata)
+    logging.warning("AFT diagnostics enabled: replay/ablations and file IO add latency; use offline or shadow first")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="pi0_lora_tacfield_local_tactile_lora_smoke")
@@ -174,12 +188,38 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--num-denoise-steps", type=int, default=10)
+    parser.add_argument("--aft-diagnostics", action="store_true")
+    parser.add_argument("--aft-diagnostics-every", type=int, default=10)
+    parser.add_argument("--aft-diagnostics-denoise-step", type=int, default=-1)
+    parser.add_argument("--aft-diagnostics-query-stride", type=int, default=1)
+    parser.add_argument("--aft-diagnostics-layers", default="",
+                        help="Zero-based comma-separated layers; empty selects last")
+    parser.add_argument("--aft-diagnostics-ablations", action="store_true")
+    parser.add_argument("--aft-diagnostics-dir", type=Path)
     args = parser.parse_args()
     if args.num_denoise_steps <= 0:
         parser.error("--num-denoise-steps must be positive")
+    if not args.aft_diagnostics and (args.aft_diagnostics_ablations or args.aft_diagnostics_dir):
+        parser.error("Diagnostic ablations/output directory require --aft-diagnostics")
+    options = None
+    if args.aft_diagnostics:
+        from openpi.policies.aft_diagnostics import DiagnosticsOptions
+        try:
+            options = DiagnosticsOptions(
+                every=args.aft_diagnostics_every, denoise_step=args.aft_diagnostics_denoise_step,
+                query_stride=args.aft_diagnostics_query_stride,
+                layers=tuple(int(x) for x in args.aft_diagnostics_layers.split(",") if x.strip()),
+                ablations=args.aft_diagnostics_ablations,
+            )
+            if options.denoise_step >= args.num_denoise_steps:
+                raise ValueError("Diagnostic denoise_step exceeds num_denoise_steps")
+        except ValueError as error:
+            parser.error(str(error))
     from openpi.serving.websocket_policy_server import WebsocketPolicyServer
 
     policy, metadata = load_policy(args.config, args.checkpoint, args.conversion, args.num_denoise_steps)
+    if options is not None:
+        configure_aft_diagnostics(policy, metadata, options, args.aft_diagnostics_dir)
     logging.info("Deployment metadata: %s", json.dumps(metadata, ensure_ascii=False))
     WebsocketPolicyServer(policy, host=args.host, port=args.port, metadata=metadata).serve_forever()
 

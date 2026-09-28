@@ -6,6 +6,8 @@ Historical marker positions retain the pretrained TCN convention unchanged.
 """
 
 import dataclasses
+import logging
+import time
 
 import numpy as np
 import jax
@@ -140,6 +142,29 @@ class AFTPolicy(base_policy.BasePolicy):
         self._rng = jax.random.key(0) if rng is None else rng
         self._sample_kwargs = sample_kwargs or {}
         self._metadata = metadata or {}
+        self._network = network
+        self._diagnostics = None
+        self._infer_count = 0
+        self._diagnostics_output_dir = None
+
+    def configure_diagnostics(self, options=None, *, output_dir=None, metadata=None):
+        """Enable optional replay/perturbation passes; leave ordinary infer fast."""
+        from openpi.shared.nnx_utils import module_jit
+        if options is not None:
+            steps = self._sample_kwargs.get("num_steps", 10)
+            if options.denoise_step >= steps:
+                raise ValueError("diagnostic denoise_step is outside num_steps")
+            depth = self._network.attention_depth
+            if options.layers and max(options.layers) >= depth:
+                raise ValueError("diagnostic layer index is outside model depth")
+            self._inspect = module_jit(
+                self._network.sample_attention, static_argnames=("num_steps", "denoise_step", "query_stride")
+            )
+        self._diagnostics = options
+        self._diagnostics_output_dir = output_dir
+        if metadata is not None:
+            self._metadata = {**self._metadata, **metadata}
+        self._infer_count = 0
 
     @property
     def metadata(self):
@@ -161,7 +186,65 @@ class AFTPolicy(base_policy.BasePolicy):
             rng = jax.random.key(seed)
         result = self._predict(rng, observation, **self._sample_kwargs)
         result = jax.tree.map(lambda x: np.asarray(x[0]), result)
-        return self._decode(dict(result, state=inputs["state"]))
+        physical = self._decode(dict(result, state=inputs["state"]))
+        options = self._diagnostics
+        count = self._infer_count
+        self._infer_count += 1
+        if options is not None and count % options.every == 0:
+            from openpi.policies.aft_diagnostics import (
+                KEY_GROUPS, QUERY_STREAMS, prediction_difference, summarize_attention,
+            )
+            diagnostic_start = time.perf_counter()
+            steps = self._sample_kwargs.get("num_steps", 10)
+            trace = self._inspect(rng, observation, num_steps=steps,
+                                  denoise_step=options.denoise_step, query_stride=options.query_stride)
+            layers = options.layers or (trace["attention"].shape[0] - 1,)
+            if max(layers) >= trace["attention"].shape[0]:
+                raise ValueError("diagnostic layer index is outside model depth")
+            d = {key: np.asarray(value) for key, value in trace.items() if key not in ("velocity", "noisy")}
+            d["attention"] = d["attention"][list(layers), 0]
+            d["key_valid"] = d["key_valid"][0]
+            d.update(summarize_attention(d))
+            d.update(schema="aft_diagnostics_v1", layer_indices=list(layers),
+                     key_group_names=list(KEY_GROUPS), query_stream_names=list(QUERY_STREAMS),
+                     image_camera_names=sorted(observation.images),
+                     denoise_step=steps - 1 if options.denoise_step == -1 else options.denoise_step,
+                     flow_time=1.0 - (steps - 1 if options.denoise_step == -1 else options.denoise_step) / steps,
+                     num_denoise_steps=steps, inference_index=count, rng_key=np.asarray(jax.random.key_data(rng)),
+                     interpretation="head_mean_attention_and_normalized_history_sensitivity_not_causal_importance")
+            d["ablations"] = {}
+            if options.ablations:
+                for name, tactile, force in (("mean_tactile_history", True, False),
+                                             ("mean_force_history", False, True), ("mean_both_histories", True, True)):
+                    perturbed = observation.replace(
+                        tactile_prefix=(jax.numpy.zeros_like(observation.tactile_prefix)
+                                        if tactile else observation.tactile_prefix),
+                        force_history=(jax.numpy.zeros_like(observation.force_history)
+                                       if force else observation.force_history),
+                    )
+                    prediction = self._predict(rng, perturbed, **self._sample_kwargs)
+                    prediction = jax.tree.map(lambda x: np.asarray(x[0]), prediction)
+                    decoded = self._decode(dict(prediction, state=inputs["state"]))
+                    d["ablations"][name] = prediction_difference(physical, decoded)
+            physical["diagnostics"] = d
+            d["diagnostics_latency_ms"] = (time.perf_counter() - diagnostic_start) * 1000
+            d["record_id"] = f"inference_{time.time_ns()}_{count:06d}"
+            action_rows = d["query_stream_id"] == 0
+            mass = d["modality_mass"][:, action_rows].mean(axis=(0, 1))
+            logging.info("AFT attention mass (%s): %s; diagnostic extra %.1f ms", d["record_id"],
+                         dict(zip(KEY_GROUPS, np.round(mass, 5).tolist(), strict=True)), d["diagnostics_latency_ms"])
+            d["capture_status"] = "not_requested"
+            if self._diagnostics_output_dir is not None:
+                from openpi.policies.aft_diagnostics import save_bundle
+                try:
+                    d["capture_status"] = "saved"
+                    save_bundle(physical, self._diagnostics_output_dir, d["record_id"],
+                                context={"server_wall_time": time.time(), "policy_metadata": self._metadata})
+                except (OSError, ValueError, TypeError) as error:
+                    d["capture_status"] = "error"
+                    d["capture_error"] = f"{type(error).__name__}: {error}"
+                    logging.exception("AFT diagnostic capture failed; preserving baseline predictions")
+        return physical
 
 
 def create_aft_policy(train_config, checkpoint, *, repack_transforms=None, sample_kwargs=None, default_prompt=None):

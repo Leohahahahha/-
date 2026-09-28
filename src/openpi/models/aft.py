@@ -55,6 +55,7 @@ class AFTModel(Pi0):
         self.tactile_loss_weight = config.tactile_loss_weight
         self.wrench_loss_weight = config.wrench_loss_weight
         vlm = gemma.get_config(config.paligemma_variant)
+        self.attention_depth = vlm.depth
         act = gemma.get_config(config.action_expert_variant)
         tac = dataclasses.replace(act, width=config.tactile_width, mlp_dim=4 * config.tactile_width, lora_configs={})
         force = dataclasses.replace(act, width=config.force_width, mlp_dim=4 * config.force_width, lora_configs={})
@@ -98,7 +99,7 @@ class AFTModel(Pi0):
         # Physical history belongs to its expert, never to the VLM prefix.
         return [], [], []
 
-    def flow(self, observation, noisy, time, target_masks=None):
+    def flow(self, observation, noisy, time, target_masks=None, *, attention_stride=None):
         prefix, prefix_valid, _ = self.embed_prefix(observation)
         action, action_valid, _, action_cond = self.embed_suffix(observation, noisy["actions"], time)
         tactile, tactile_cond = self.tactile_expert.encode(noisy["shear"], time)
@@ -142,16 +143,50 @@ class AFTModel(Pi0):
             ],
             axis=1,
         )
-        outputs, _ = self.PaliGemma.llm(
+        diagnostic_queries = None
+        if attention_stride is not None:
+            slots = jnp.arange(0, h, attention_stride)
+            starts = (prefix.shape[1] + action_history,
+                      prefix.shape[1] + action.shape[1] + 1,
+                      prefix.shape[1] + action.shape[1] + tactile.shape[1] + 1)
+            diagnostic_queries = jnp.concatenate([start + slots for start in starts])
+        llm_result = self.PaliGemma.llm(
             [prefix, action, tactile, force],
             positions=positions,
             mask=make_aft_attention_mask(valid, groups),
             adarms_cond=[None, action_cond, tactile_cond, force_cond],
+            attention_queries=diagnostic_queries,
         )
-        return dict(
+        outputs = llm_result[0]
+        velocity = dict(
             actions=self.action_out_proj(outputs[1][:, action_history : action_history + h]),
             shear=self.tactile_expert.out_proj(outputs[2][:, 1 : 1 + h]),
             wrench=self.force_expert.out_proj(outputs[3][:, 1 : 1 + h]),
+        )
+        if attention_stride is None:
+            return velocity
+        text_length = 0 if observation.tokenized_prompt is None else observation.tokenized_prompt.shape[1]
+        image_length = (prefix.shape[1] - text_length) // len(observation.images)
+        key_groups, camera_ids, patch_indices = [], [], []
+        for camera_id, name in enumerate(observation.images):
+            group_id = 0 if name == "base_0_rgb" else (1 if name == "left_wrist_0_rgb" else 2)
+            key_groups.append(jnp.full((image_length,), group_id))
+            camera_ids.append(jnp.full((image_length,), camera_id))
+            patch_indices.append(jnp.arange(image_length))
+        image_tokens = prefix.shape[1] - text_length
+        key_groups += [jnp.full((text_length,), 3), jnp.full((action_history,), 4),
+                       jnp.full((h,), 5), jnp.array([6]), jnp.full((h,), 7),
+                       jnp.array([8]), jnp.full((h,), 9)]
+        non_image_length = valid.shape[1] - image_tokens
+        attention = llm_result[2]
+        query_valid = jnp.take(valid, diagnostic_queries, axis=1)
+        attention = jnp.where(query_valid[None, :, :, None], attention, 0.0)
+        return velocity, dict(
+            attention=attention, key_group_id=jnp.concatenate(key_groups), key_valid=valid,
+            key_camera_id=jnp.concatenate([*camera_ids, jnp.full((non_image_length,), -1)]),
+            key_patch_index=jnp.concatenate([*patch_indices, jnp.full((non_image_length,), -1)]),
+            query_stream_id=jnp.repeat(jnp.arange(3), len(slots)),
+            query_horizon_index=jnp.tile(slots, 3),
         )
 
     def compute_loss(self, rng, observation, targets, *, train=False, return_components=False):
@@ -200,3 +235,34 @@ class AFTModel(Pi0):
 
     def sample_actions(self, rng, observation, **kwargs):
         return self.sample_predictions(rng, observation, **kwargs)["actions"]
+
+    def sample_attention(self, rng, observation, *, num_steps=10, denoise_step=-1, query_stride=1):
+        """Replay the same noise to one Euler evaluation and export head means.
+
+        Separate opt-in pass: the standard inference/training graphs and returned
+        predictions remain untouched. The selected step is zero-based; -1 is last.
+        """
+        if num_steps <= 0 or query_stride <= 0:
+            raise ValueError("num_steps and query_stride must be positive")
+        denoise_step = num_steps - 1 if denoise_step == -1 else denoise_step
+        if not 0 <= denoise_step < num_steps:
+            raise ValueError("denoise_step must be -1 or within num_steps")
+        observation = model.preprocess_observation(
+            None, observation, tactile_type=self.tactile_type, image_resolution=self.image_resolution
+        )
+        b, h = observation.state.shape[0], self.action_horizon
+        x = {key: jax.random.normal(r, (b, h, dim)) for key, dim, r in zip(
+            ("actions", "shear", "wrench"), (self.action_dim, 396, 6), jax.random.split(rng, 3), strict=True
+        )}
+
+        def step(i, current):
+            v = self.flow(observation, current, jnp.full((b,), 1.0 - i / num_steps))
+            return jax.tree.map(lambda value, delta: value - delta / num_steps, current, v)
+
+        noisy = jax.lax.fori_loop(0, denoise_step, step, x)
+        velocity, trace = self.flow(
+            observation, noisy, jnp.full((b,), 1.0 - denoise_step / num_steps), attention_stride=query_stride
+        )
+        # Values make replay independently verifiable; serving omits these large
+        # physical-state tensors and exports only the attention/layout fields.
+        return dict(trace, noisy=noisy, velocity=velocity)
