@@ -8,6 +8,8 @@ User approved the prior in-chat design: optional attention export, modality summ
 2. Test-first opt-in attention capture without parameter-tree or default inference changes — complete.
 3. Test-first policy diagnostics, fixed-noise perturbations, export/plot and server options — complete.
 4. Deployment handoff, incident log, dual-GPU instructions, regression verification and Git commits — complete (code 2e4a9c8; documentation saved alongside this plan).
+5. Diagnose user-provided 14:49 training log, XLA memory warning and live progress without restarting training — complete; current dual-GPU run has real updates, old 4gpu-named run failed on missing adjacency assets. Incident57 records evidence and verification boundaries.
+6. Diagnose missing W&B charts: identify current run/project, inspect sync evidence and read-only cloud history — complete; approved host query confirms running and uploaded step300 in tabero-aft/fwut42ps, not legacy tabero-vtla. Incident58 updated.
 
 ## Constraints
 

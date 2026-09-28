@@ -79,6 +79,8 @@
 | 2026-09-23 | 首次推送新分支的TLS中断与GitHub 403（54） | 工程环境/权限 | 网络已恢复；当前账号缺少原仓库写权限 |
 | 2026-09-27 | A/F/T 慢专家对白板 v2 数据及 FR3 部署的契约缺口（55） | 数据时序/服务接口/真机输入 | 兼容代码与 CPU 准备/测试已验证；GPU训练、shadow、真机待验证 |
 | 2026-09-28 | 推理注意力可视化与模态作用的区别（56） | 模型解释/部署诊断 | 默认关闭的诊断/绘图已实现并经CPU测试；真实权重及部署侧接入待验证 |
+| 2026-09-28 | AFT启动资产缺失与首次编译警告误判（57） | 训练启动/显存/可观测性 | 旧运行缺文件失败；新运行已通过首步并持续训练，最终效果待验证 |
+| 2026-09-28 | AFT新运行的W&B项目与图表可见性（58） | 训练监控/云端同步 | 云端确认running且已上传step300；用户页面/筛选状态未直接观察 |
 
 ## 1. Bash 多行粘贴触发 `free(): invalid pointer`
 
@@ -690,6 +692,28 @@
 - **修复/实现**：添加服务端诊断开关/抽样周期/层/query stride/去噪步及可选三次历史扰动；返回`aft_diagnostics_v1`，计算有效key组总mass、每token平均及counts。只把归一化历史替换为统计均值，保留future三路生成、mask和RNG；姿态差异用SO(3)。JSON+numeric NPZ禁止pickle/覆盖，暂存后独占发布且manifest最后可见；普通写盘/发布失败清理本次文件，策略响应标记capture_error并保留baseline预测。层编号在configure阶段校验。独立review三项重要问题已补红绿测试修复。文档`docs/aft_inference_diagnostics_deployment_handoff.md`明确客户端还需接收诊断、标记采集时间/plan_id及后台记录；训练仍双卡FSDP2，不增加训练loss或参数。
 - **验证范围**：97项AFT/部署定向CPU测试通过（含原客户端安全与metadata回归）；独立review另跑22项通过；E/F lint排除已有jaxtyping F722误报后通过，Git whitespace检查通过。首次扩大CPU项目测试233通过/9失败：tokenizer与transforms四项默认缓存只读；旧tabero_offline factory触觉两项和tabero_baseline inverse一项使用无效reference-grid；data_loader fake及train debug两项缺少debug配置。后五项在改动前d734786干净归档中同样失败；改用已有OPENPI缓存后三个文本tokenizer测试通过，FAST测试仍缺离线资产。未修复这些无关旧测试，未运行巨型模型/网络下载/Orbax roundtrip测试；上游JAX/Flax弃用警告仍在。无真实checkpoint/GPU峰值/训练/W&B/ROS/shadow/机器人执行验证；诊断开销先在离线或shadow实测，不能据CPU测试保证在线安全。
 - **面试讲法**：先分清 attention 在读取什么、输入扰动是否改变输出以及是否改善闭环性能；用热力图解释交互，用固定噪声的配对实验衡量敏感性，不把高注意力直接称为传感器贡献。
+
+## 57. AFT启动资产缺失与首次编译警告误判
+
+- **日期**：2026-09-28。
+- **状态**：旧4gpu命名运行的启动失败已定位；新双卡运行初始化、初始验证和真实优化更新已通过，仍在训练。未改训练代码、未由助手启动/重启/停止训练，未验证完整30k、保存恢复或模型效果。
+- **现象**：旧运行在读取邻接表时退出，随后用户Ctrl+C出现JAX清理回调的KeyboardInterrupt。新附件停在`Can't reduce memory use below 26.21GiB ... only reduced to 36.20GiB`，容易被认为显存耗尽或训练失败。
+- **证据**：旧日志`/data/yanghaojun/outputs/logs/whiteboard_v2_aft_full_30k_4gpu_20260928.log`明确以`FileNotFoundError`退出，缺少官方资产目录的`adjacency.json`，当时也未加载norm stats。当前官方目录的adjacency/manifest/norm_stats均存在，文件时间14:25。新日志`whiteboard_v2_aft_full_30k_20260928.log`与W&B本地run `fwut42ps`显示14:51:30完成validation step 0（174 batches，loss 2.4426），14:54:26首次JIT编译耗时2分23秒的提示结束，14:54:36后有真实训练更新。metrics.jsonl中update-count 1/101/201的总loss为5.0729/2.1332/1.0769，三个模态loss均有限，update_applied与各finite标记为1。15:00:32进度256/30000，约1.4秒/步。宿主机只读ps确认PID3350638存活，命令为FSDP2/global batch2；沙箱内ps/pgrep不可见，不能凭沙箱空结果宣称进程退出。当前run目录还无数字checkpoint，尚未达到save_interval=6000。
+- **根因或明确假设**：旧运行的直接失败原因是训练准备资产缺失，不是Ctrl+C、网络或GPU错误；不能将后续清理阶段KeyboardInterrupt替代原始异常。新运行的rematerialization和slow compile信息是编译器警告/耗时提示，后续成功更新证明本次没有在该处失败；36.20GiB是编译内存规划信息，不是nvidia-smi实测峰值，不能据此保证未来评估/保存不OOM。初期loss下降不证明最终泛化或真机效果。
+- **修复/处理**：旧运行需要先完整完成`scripts/prepare_aft.py`并核对三份资产，再采用新实验名启动；用户已自行完成资产准备并启动新运行。新运行无需因这些警告重启或改超参；使用新run的日志而非旧4gpu命名日志观察进度。助手本次仅记录诊断，未改模型、精度、优化器或训练参数。
+- **验证范围**：用户发起的真实GPU训练已完成初始化、174个初始验证batch及至少256个进度迭代；仅有限几个日志点可见finite标记。只读检查日志、run_config、metrics、资产/输出目录与宿主机PID。未读GPU利用率/实测峰值，未作完整训练、checkpoint恢复、离线评估、shadow或机器人验证。
+- **面试讲法**：以时间线和run_id区分历史失败与当前训练，再区分编译器规划警告、初始验证和真实优化更新；用持续增长的日志、finite标记和宿主机进程交叉验证状态，避免把慢编译或隔离环境的进程不可见误判为训练崩溃。
+
+## 58. AFT新运行的W&B项目与图表可见性
+
+- **日期**：2026-09-28。
+- **状态**：只读云端API确认新run存在、running且指标已上传；不存在本次证据支持的“没有上传”问题。用户正在查看的页面与筛选条件未直接观察。
+- **现象**：训练日志已持续更新，但用户在W&B未看到新的训练日志/曲线。
+- **证据**：当前run为`1337105397-shenzhen/tabero-aft/fwut42ps`，名称`whiteboard_v2_aft_full_30k_20260928`，与旧失败run `lla13wem`和旧项目`tabero-vtla`不同。当前config启用wandb，`scripts/train.py`按log_interval=100调用wandb.log，验证按eval_interval=1000记录validation/*。经授权在宿主机使用W&B Public API只读查询，返回state=running、summary._step=300、loss=0.7312001、action_loss=0.3685402、tactile_loss=2.0529358、wrench_loss=1.5736630；抽取history同样包含step0/200/300。validation/loss=2.4426227对应初始验证，还不是1000步验证。沙箱首次API尝试被socket PermissionError拒绝，宿主机查询成功，此沙箱错误不是训练进程网络断开证据。
+- **根因或明确假设**：确定事实是新配置将project_name改为tabero-aft且云端已收到指标。若用户仍查看tabero-vtla、旧4gpu命名run、错误团队或带筛选workspace，会找不到本次run；这些UI原因属于未直接验证的候选解释。不能把SDK本地Syncing提示当上传成功证据，亦不能把沙箱网络错误当宿主机故障。
+- **修复/处理**：无需重启训练、重新登录或修改代码；直接打开`https://wandb.ai/1337105397-shenzhen/tabero-aft/runs/fwut42ps`核对名称，查看loss/action_loss/tactile_loss/wrench_loss和validation/*，必要时刷新/清除workspace筛选。训练曲线100步更新一次，验证1000步更新一次，视频/相机图像未开启。仅给出页面定位指导，不改远端run状态、不强制sync当前活跃run。
+- **验证范围**：实际读取云端summary和三条history样本，确认截至300日志点已上传；没有审阅用户浏览器界面或保证后续持续网络可用。未执行额外训练、外部写入、依赖安装或真机操作。
+- **面试讲法**：先用project/entity/run_id绑定实际训练与监控页面，再用只读云端history确认数据是否抵达；区分上传故障与页面定位/展示问题，同时解释采样频率与验证频率，避免通过重启健康训练解决界面问题。
 
 ## 当前推荐的端到端排查顺序
 

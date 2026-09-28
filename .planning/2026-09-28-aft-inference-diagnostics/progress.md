@@ -1,5 +1,13 @@
 # Progress
 
+2026-09-28 new diagnostic-only request: read using-superpowers, systematic-debugging and planning-with-files, recovered the clean isolated worktree and prior plan. Latest attachment ends with a memory-planner warning after initial validation. Checking current process and complete log; no training/restart/kill or implementation change authorized.
+
+Diagnosis complete: corrected a too-restrictive first process regex; direct PID/simple pgrep still invisible inside sandbox, so requested approval for host read-only ps and confirmed PID3350638 active. New run log grew from144 to256 iterations while inspecting; real update metrics finite and early loss decreasing. The similarly named4gpu log is a separate old failure (missing adjacency.json), not current run. Updated incident57 with both timelines, current dual-GPU settings and no-checkpoint-yet/effectiveness limitations. Only planning/incident documentation changed, no production code, training or control mutation.
+
+User added W&B visibility question before completion. Checked current run/project and local sync logs plus wandb.log code path. Current train progress352 as of15:02:45; step300 recorded loss0.7312 with finite flags1. Read-only W&B API started to distinguish server metrics from local buffers; sandbox global settings warning noted, no credential output or external writes requested.
+
+W&B query: sandbox failed because creating network sockets is not permitted; per permissions requested host read-only escalation and succeeded. Cloud confirms fwut42ps/tabero-aft running and uploadedstep300. Updated incident58 and completed additional diagnostic phase; browser filter/page not observed. git diff --check passed before final documentation updates; verifying final documentation and saving only isolated branch records.
+
 2026-09-28: Recovered isolated worktree and previous task state. Read brainstorming, planning-with-files, TDD/test reference and verification skills. Prior short design approved by user's request to implement. No model training started. Will reuse existing environment and CPU toy models for diagnostics verification.
 
 Baseline: 83 targeted CPU tests passed in 7.92 s. Prior temporary data preparation completed: 39 episodes, 15,242 true/40 false edges, 670,040 valid action/sensor slots. E/F lint and git diff whitespace checks passed. GPU and real-checkpoint validation remain unperformed.

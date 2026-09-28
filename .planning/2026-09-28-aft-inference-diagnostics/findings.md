@@ -1,5 +1,13 @@
 # Findings
 
+2026-09-28 training status investigation: the new attachment reports successful initialization of 3,490,383,266 trainable parameters and validation step 0 (174 batches), followed by an XLA rematerialization warning, not an exception. Actual optimizer-step progress and current process state require separate verification; validation step 0 is not a training update.
+
+Live investigation result: old 14:22 run lla13wem/4gpu-named log failed due to missing adjacency.json; official assets now exist dated14:25. New14:47 run fwut42ps is FSDP2/batch2; live log grows past first compilation and256 iterations as of15:00:32. Train metrics update counts1/101/201 loss5.0729/2.1332/1.0769 with finite flags1. PID3350638 is present on host after approved read-only ps, but absent in sandbox; process-namespace visibility is a diagnostic boundary, not exit evidence. No checkpoint yet (save6000). XLA36.20GiB is compiler planning, not measured VRAM. No restart or code/config fix warranted by warning alone.
+
+W&B follow-up: current run belongs to 1337105397-shenzhen/tabero-aft/fwut42ps, not prior tabero-vtla project or old lla13wem. Config wandb_enabled=True, train log interval100, validation1000, wandb.log calls present in training. Local debug-internal has only a brief flowcontrol backup/unblock at14:48:25, no observed network/error retries. No proof yet of cloud latest metrics; read-only API query pending.
+
+Cloud verification complete: first sandbox query failed on socket PermissionError/ProxyError, then approved host read-only Public API query succeeded. Actual state running, summary._step300, loss0.7312001/action0.3685402/tactile2.0529358/wrench1.5736630; sampled history confirms uploads. Validation remains initial step0. User UI unseen, so wrong project/run/workspace filter is a plausible UI explanation, not proven observed behavior. No sync/login/restart needed.
+
 - Gemma Attention softmax has [B,K,G,Q,S]; current return is embeddings and cache only. Scan stacks layers. No modality scalar gate exists.
 - AFT concatenation is VLM prefix, action (state token for pi0), tactile (history token + H), force (history token + H). Three future streams use identical physical horizon indices.
 - Current TCN compresses history to one token; force MLP compresses 8x6 to one token. Attention cannot reveal individual raw history frames/markers.
