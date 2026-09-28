@@ -22,12 +22,14 @@ from transport import RemotePolicy
 from transport import RobotHttp
 
 
-def load_config(path, *, robot_url=None, policy_url=None):
+def load_config(path, *, robot_url=None, policy_url=None, prompt=None):
     config = json.loads(path.read_text())
     if robot_url is not None:
         config["robot_url"] = robot_url
     if policy_url is not None:
         config["policy_url"] = policy_url
+    if prompt is not None:
+        config["prompt"] = prompt
     for key in (
         "http_timeout_sec",
         "policy_timeout_sec",
@@ -123,29 +125,27 @@ def control_loop(source, policy, robot, config, *, execute, duration, stopped, l
             result_age = inference_finished - chunk.observation_time
             chunk_id += 1
             accepted = result_age <= config["max_result_age_sec"]
-            log.write(
-                json.dumps(
-                    {
-                        "event": "inference_chunk",
-                        "wall_time": time.time(),
-                        "mode": "execute" if execute else "shadow",
-                        "synchronous": True,
-                        "chunk_id": chunk_id,
-                        "accepted": accepted,
-                        "inference_latency_sec": inference_latency,
-                        "observation_age_sec_at_accept": result_age,
-                        "selected_action_index": 0,
-                        "requested_action_indices": list(range(config["actions_per_inference"])),
-                        "requested_action_steps": config["actions_per_inference"],
-                        "observation_state": chunk.observation_state.tolist(),
-                        "actions": chunk.actions.tolist(),
-                        "predicted_wrist_wrench": (
-                            None if chunk.wrist_wrench is None else chunk.wrist_wrench.tolist()
-                        ),
-                    }
-                )
-                + "\n"
-            )
+            inference_record = {
+                "event": "inference_chunk",
+                "wall_time": time.time(),
+                "mode": "execute" if execute else "shadow",
+                "synchronous": True,
+                "chunk_id": chunk_id,
+                "accepted": accepted,
+                "inference_latency_sec": inference_latency,
+                "observation_age_sec_at_accept": result_age,
+                "selected_action_index": 0,
+                "requested_action_indices": list(range(config["actions_per_inference"])),
+                "requested_action_steps": config["actions_per_inference"],
+                "observation_state": chunk.observation_state.tolist(),
+                "actions": chunk.actions.tolist(),
+                "predicted_wrist_wrench": None if chunk.wrist_wrench is None else chunk.wrist_wrench.tolist(),
+            }
+            if chunk.tactile_shear is not None:
+                inference_record["predicted_tactile_shear"] = chunk.tactile_shear.tolist()
+                inference_record["observed_wrist_wrench_K"] = sample.data["force_history"][-1].tolist()
+                inference_record["observed_wrist_wrench_capture_time"] = sample.wrench_capture_time
+            log.write(json.dumps(inference_record) + "\n")
             log.flush()
             if not accepted:
                 raise RuntimeError("Inference result too old; refusing stale target")
@@ -311,6 +311,7 @@ def main():
     parser.add_argument("--conversion", type=Path, default=Path(__file__).with_name("tabero_conversion.json"))
     parser.add_argument("--robot-url", help="Override config robot_url, e.g. http://172.31.179.19:5000")
     parser.add_argument("--policy-url", help="Override config policy_url, e.g. ws://192.168.1.20:8000")
+    parser.add_argument("--prompt", help="Exact task prompt used during training; checked against AFT metadata")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--no-tactile", action="store_true", help="Requires a separately trained RGB+state server")
     parser.add_argument(
@@ -323,7 +324,7 @@ def main():
     args = parser.parse_args()
     if not np.isfinite(args.seconds) or args.seconds <= 0:
         parser.error("--seconds must be finite and positive")
-    config = load_config(args.config, robot_url=args.robot_url, policy_url=args.policy_url)
+    config = load_config(args.config, robot_url=args.robot_url, policy_url=args.policy_url, prompt=args.prompt)
     if args.actions_per_inference is not None:
         if not 1 <= args.actions_per_inference <= 2:
             parser.error("--actions-per-inference must be in [1, 2]")

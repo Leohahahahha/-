@@ -198,7 +198,7 @@ class LiveObservations:
                     data["tactile_marker_motion"] = validate_tactile_marker_motion(marker)
                 if self.use_force:
                     data = add_aft_force_input(data, self.force_history, frames["force"][0], frames["force"][1])
-                sample = Sample(data, now, min(stamps.values()))
+                sample = Sample(data, now, min(stamps.values()), stamps.get("force"))
                 with self.lock:
                     self.sample, self.problem = sample, None
             except Exception as exc:

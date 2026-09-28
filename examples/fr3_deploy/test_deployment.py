@@ -271,6 +271,45 @@ def test_remote_force_policy_validates_and_preserves_predicted_wrench():
         policy.infer(sample)
 
 
+def test_remote_aft_three_output_contract():
+    policy = object.__new__(transport.RemotePolicy)
+    policy.metadata = {"architecture": "aft", "use_tactile": True, "action_horizon": 50,
+                       "predicts_wrench": True, "predicts_tactile": True}
+    policy.timeout = 1
+    sent = []
+    policy.ws = SimpleNamespace(send=sent.append)
+    policy.packer = SimpleNamespace(pack=lambda value: value)
+    marker = core.MarkerHistory().append(np.zeros((240, 320, 2), np.float32), np.zeros((240, 320, 2), np.float32))
+    data = {"state": state(), "tactile_marker_motion": marker}
+    sample = core.Sample(data, 1.0, 1.0)
+    with pytest.raises(ValueError, match="force_history"):
+        policy.infer(sample)
+    assert sent == []
+    data["force_history"] = np.zeros((8, 6), np.float32)
+    data["force_history_mask"] = np.array([False] * 8)
+    with pytest.raises(ValueError, match="force_history_mask"):
+        policy.infer(sample)
+    assert sent == []
+    data["force_history_mask"][-1] = True
+    actions = np.repeat(state()[None], 50, axis=0)
+    shear = np.arange(50 * 198 * 2, dtype=np.float32).reshape(50, 198, 2)
+    wrench = np.ones((50, 6), np.float32)
+    policy.receive = lambda timeout: {"actions": actions, "tactile_shear": shear, "wrist_wrench": wrench}
+    chunk = policy.infer(sample)
+    np.testing.assert_array_equal(chunk.actions, actions)
+    np.testing.assert_array_equal(chunk.tactile_shear, shear)
+    np.testing.assert_array_equal(chunk.wrist_wrench, wrench)
+    for invalid in (None, np.zeros((50, 396)), np.full((50, 198, 2), np.nan)):
+        policy.receive = lambda timeout, invalid=invalid: {"actions": actions, "tactile_shear": invalid,
+                                                            "wrist_wrench": wrench}
+        with pytest.raises(ValueError, match="tactile"):
+            policy.infer(sample)
+    policy.receive = lambda timeout: {"actions": actions, "tactile_shear": shear,
+                                      "wrist_wrench": np.full((50, 6), np.nan)}
+    with pytest.raises(ValueError, match="wrist-wrench"):
+        policy.infer(sample)
+
+
 @pytest.mark.parametrize("mode", ["full", "shear_depth"])
 def test_real_ipc_pack_decode_parity(mode):
     arrays = {
@@ -439,6 +478,14 @@ def test_live_config_uses_stream_specific_qos_and_url_overrides():
     assert changed["policy_url"] == "ws://192.168.1.20:8000"
 
 
+def test_whiteboard_prompt_can_be_selected_without_changing_legacy_config():
+    original = run.load_config(ROOT / "config.json")
+    whiteboard = "Pick up the yellow whiteboard eraser and erase the X-shaped mark on the whiteboard."
+    selected = run.load_config(ROOT / "config.json", prompt=whiteboard)
+    assert selected["prompt"] == whiteboard
+    assert original["prompt"] != whiteboard
+
+
 def test_config_rejects_unsafe_action_prefix_length(tmp_path):
     raw = json.loads((ROOT / "config.json").read_text())
     raw["actions_per_inference"] = 3
@@ -484,7 +531,8 @@ class Clock:
 
 
 def controller_fixture(
-    monkeypatch, config, *, latency=0.145, enabled_until=float("inf"), invalid=False, fail_gripper=False
+    monkeypatch, config, *, latency=0.145, enabled_until=float("inf"), invalid=False, fail_gripper=False,
+    aft=False,
 ):
     clock = Clock()
     measured = state()
@@ -495,7 +543,11 @@ def controller_fixture(
             pass
 
         def snapshot(self):
-            return core.Sample({"state": measured.copy()}, clock.now, clock.now)
+            data = {"state": measured.copy()}
+            if aft:
+                data["force_history"] = np.repeat(np.arange(6, dtype=np.float32)[None], 8, axis=0)
+                data["force_history_mask"] = np.array([False] * 7 + [True])
+            return core.Sample(data, clock.now, clock.now, clock.now - 0.01 if aft else None)
 
         def measured_state(self):
             return measured.copy()
@@ -512,6 +564,9 @@ def controller_fixture(
             actions[:, 6] += 0.001
             if invalid:
                 actions[:, 0] += 0.1
+            if aft:
+                return core.Chunk(actions, sample.monotonic, sample.data["state"].copy(),
+                                  np.ones((50, 6), np.float32), np.ones((50, 198, 2), np.float32))
             return core.Chunk(actions, sample.monotonic, sample.data["state"].copy())
 
         def close(self):
@@ -562,6 +617,20 @@ def test_shadow_makes_no_robot_writes_and_synchronously_uses_action_zero(monkeyp
     assert ticks[0]["prediction"] == pytest.approx(expected_action0.tolist())
     assert ticks[0]["distances"]["current_vs_observation"]["position_m"] == pytest.approx(0)
     assert ticks[0]["distances"]["action0_vs_previous_tick"] is None
+
+
+def test_aft_shadow_logs_three_predictions_and_observed_k_wrench_without_commands(monkeypatch, config):
+    execute, records, log = controller_fixture(monkeypatch, config, aft=True)
+    execute(live=False)
+    assert records == []
+    rows = [json.loads(line) for line in log.getvalue().splitlines()]
+    chunk = next(row for row in rows if row["event"] == "inference_chunk")
+    assert np.asarray(chunk["predicted_tactile_shear"]).shape == (50, 198, 2)
+    assert np.asarray(chunk["predicted_wrist_wrench"]).shape == (50, 6)
+    assert chunk["observed_wrist_wrench_K"] == [0, 1, 2, 3, 4, 5]
+    assert chunk["observed_wrist_wrench_capture_time"] == pytest.approx(
+        chunk["wall_time"] - chunk["inference_latency_sec"] - 0.01
+    )
 
 
 def test_two_action_prefix_runs_at_dataset_period_and_rechecks_each_target(monkeypatch, config):

@@ -76,6 +76,14 @@ class RemotePolicy:
             if "tactile_marker_motion" not in sample.data:
                 raise ValueError("Tactile policy requires tactile_marker_motion")
             validate_tactile_marker_motion(sample.data["tactile_marker_motion"])
+        aft = self.metadata.get("architecture") == "aft"
+        if aft:
+            history = np.asarray(sample.data.get("force_history"))
+            mask = np.asarray(sample.data.get("force_history_mask"))
+            if history.shape != (8, 6) or history.dtype != np.float32 or not np.isfinite(history).all():
+                raise ValueError("AFT requires finite float32 force_history[8,6]")
+            if mask.shape != (8,) or mask.dtype != bool or not mask[-1]:
+                raise ValueError("AFT requires boolean force_history_mask[8] with valid current sample")
         self.ws.send(self.packer.pack(sample.data))
         output = self.receive(timeout=120 if warmup else self.timeout)
         actions = np.asarray(output["actions"], dtype=np.float64)
@@ -86,10 +94,15 @@ class RemotePolicy:
             wrist_wrench = np.asarray(output.get("wrist_wrench"), dtype=np.float64)
             if wrist_wrench.shape != (self.metadata["action_horizon"], 6) or not np.isfinite(wrist_wrench).all():
                 raise ValueError(f"Expected finite wrist-wrench chunk [{self.metadata['action_horizon']},6]")
+        tactile_shear = None
+        if aft:
+            tactile_shear = np.asarray(output.get("tactile_shear"), dtype=np.float64)
+            if tactile_shear.shape != (self.metadata["action_horizon"], 198, 2) or not np.isfinite(tactile_shear).all():
+                raise ValueError(f"Expected finite tactile-shear chunk [{self.metadata['action_horizon']},198,2]")
         observation_state = np.asarray(sample.data["state"], dtype=np.float64)
         if observation_state.shape != (7,) or not np.isfinite(observation_state).all():
             raise ValueError("Expected finite observation state [7]")
-        return Chunk(actions, sample.monotonic, observation_state.copy(), wrist_wrench)
+        return Chunk(actions, sample.monotonic, observation_state.copy(), wrist_wrench, tactile_shear)
 
     def close(self):
         self.ws.close()

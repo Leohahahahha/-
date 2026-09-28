@@ -294,6 +294,7 @@ class Sample:
     data: dict
     monotonic: float
     oldest_capture: float
+    wrench_capture_time: float | None = None
 
 
 @dataclass(frozen=True)
@@ -302,6 +303,7 @@ class Chunk:
     observation_time: float
     observation_state: np.ndarray
     wrist_wrench: np.ndarray | None = None
+    tactile_shear: np.ndarray | None = None
 
 
 def action_distance_metrics(left, right):
