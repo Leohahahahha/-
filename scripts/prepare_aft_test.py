@@ -25,3 +25,12 @@ def test_preparation_does_not_overwrite_assets(tmp_path):
     with pytest.raises(FileExistsError):
         main("aft_pi0_next_state_full", str(tmp_path))
     assert (tmp_path / "sentinel").read_text() == "keep"
+
+
+def test_audit_target_counts_do_not_cross_segment_boundaries():
+    from scripts.prepare_aft import window_target_counts
+
+    edges = np.array([True, False, True])
+    assert window_target_counts(edges, horizon=50, action_offset=1) == (2, 2)
+    assert window_target_counts(edges, horizon=50, action_offset=0) == (6, 2)
+    assert window_target_counts(np.ones(3, bool), horizon=2, action_offset=1) == (5, 5)

@@ -50,6 +50,55 @@ def _is_contiguous(current, following):
     )
 
 
+def _audit_source_coverage(rows, report, omitted_terminal):
+    """Reconcile dense per-episode source identities and timing with conversion counts."""
+    frames = report["frames"]
+    removed = report.get("removed_supervised_samples", 0)
+    missing = report.get("missing_candidate_steps", 0)
+    if any(type(v) is not int or v < 0 for v in (frames, removed, missing)) or frames < 2:
+        raise ValueError("source timing report counts must be nonnegative integers")
+    excluded = report.get("excluded_image_frame_ids", [])
+    if (
+        not isinstance(excluded, list)
+        or any(type(i) is not int for i in excluded)
+        or len(set(excluded)) != len(excluded)
+        or len(excluded) != removed
+    ):
+        raise ValueError("source exclusion list contradicts removed sample count")
+    times = {}
+    for row in rows:
+        source, target = row["source_row_index"], row["action_source_row_index"]
+        if not 0 <= source < frames - int(omitted_terminal) or not 0 <= target < frames:
+            raise ValueError("source/action_source indices outside report bounds")
+        if row["source_frame_index"] != source or row["action_source_frame_index"] != target:
+            raise ValueError("source row/frame indices must match the dense source frame identity")
+        if target != source + 1:
+            raise ValueError("action_source must be the next original source row")
+        for index, stamp in ((source, row["source_timestamp"]), (target, row["action_source_timestamp"])):
+            if index in times and not math.isclose(times[index], stamp, abs_tol=0.005):
+                raise ValueError("source/action_source timing disagrees for the same source row")
+            times[index] = stamp
+    expected = set(range(frames - int(omitted_terminal))) - set(excluded)
+    if {row["source_row_index"] for row in rows} != expected:
+        raise ValueError("retained source rows contradict reported exclusions")
+    if 0 not in times or frames - 1 not in times:
+        raise ValueError("source timing endpoints unavailable; cannot audit reported missing steps")
+    known = sorted(times.items())
+    missing_observed = 0
+    for (before, start), (after, end) in zip(known, known[1:]):
+        duration = end - start
+        slots = round(duration / 0.1)
+        if slots < after - before or not math.isclose(duration, slots * 0.1, abs_tol=0.005):
+            raise ValueError("source timing does not match original 10 Hz slots")
+        missing_observed += slots - (after - before)
+    if missing_observed != missing:
+        raise ValueError("source timing contradicts reported missing candidate steps")
+    if "source_duration_sec" in report and not math.isclose(
+        times[frames - 1] - times[0], report["source_duration_sec"], abs_tol=0.005
+    ):
+        raise ValueError("source timing duration contradicts conversion report")
+
+
 def audit_episode_edges(root, conversion, episode, length, supplied=None):
     """Audit output adjacency against original source provenance, not compact output time."""
     mapping_path = source_mapping_path(root, episode)
@@ -108,6 +157,7 @@ def audit_episode_edges(root, conversion, episode, length, supplied=None):
             or row["source_timestamp"] <= rows[i - 1]["source_timestamp"]
         ):
             raise ValueError(f"episode {episode}: source mapping must increase strictly")
+    _audit_source_coverage(rows, report, omitted_terminal)
     edges = np.asarray([_is_contiguous(a, b) for a, b in zip(rows, rows[1:])], dtype=bool)
     if supplied is not None and str(episode) in supplied:
         provided = np.asarray(supplied[str(episode)])
@@ -133,6 +183,17 @@ def read_episode(root, episode):
     return rows
 
 
+def validate_next_state_labels(rows, edges, episode):
+    """Compare next-state supervision in SO(3), skipping audited temporal gaps."""
+    from scipy.spatial.transform import Rotation
+
+    a, s = rows["actions"][:-1][edges], rows["state"][1:][edges]
+    if not np.allclose(a[:, [0, 1, 2, 6]], s[:, [0, 1, 2, 6]], atol=1e-5):
+        raise ValueError(f"episode {episode}: next_state actions disagree with next state")
+    if len(a) and np.max((Rotation.from_rotvec(a[:, 3:6]).inv() * Rotation.from_rotvec(s[:, 3:6])).magnitude()) > 1e-4:
+        raise ValueError(f"episode {episode}: next_state rotations disagree")
+
+
 class AFTDataset:
     """Use LeRobot for current RGB only, explicit episode-local arrays for targets."""
 
@@ -154,19 +215,7 @@ class AFTDataset:
                 data_config.root, self.conversion, ep, len(rows["state"]), self.supplied
             )
             if data_config.aft_action_state_step_offset:
-                # Validate only known-contiguous transitions; compare physical SO(3), not rotvec branches.
-                from scipy.spatial.transform import Rotation
-
-                valid = self.edges[ep]
-                a, s = rows["actions"][:-1][valid], rows["state"][1:][valid]
-                if not np.allclose(a[:, [0, 1, 2, 6]], s[:, [0, 1, 2, 6]], atol=1e-5):
-                    raise ValueError(f"episode {ep}: next_state actions disagree with next state")
-                if (
-                    len(a)
-                    and np.max((Rotation.from_rotvec(a[:, 3:6]).inv() * Rotation.from_rotvec(s[:, 3:6])).magnitude())
-                    > 1e-4
-                ):
-                    raise ValueError(f"episode {ep}: next_state rotations disagree")
+                validate_next_state_labels(rows, self.edges[ep], ep)
 
     def __len__(self):
         return len(self.dataset)

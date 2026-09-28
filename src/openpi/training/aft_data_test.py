@@ -82,6 +82,7 @@ def test_nonfinite_valid_sensor_rejected():
 def filtered_mapping(tmp_path, *, source_frames=(0, 1, 3, 4), timestamps=(0.0, 0.1, 0.3, 0.4)):
     mapping_dir = tmp_path / "meta/source_mapping"
     mapping_dir.mkdir(parents=True)
+    source_times = dict(zip(source_frames, timestamps, strict=True))
     mapping = {
         "source_episode_index": 0,
         "rows": [
@@ -92,7 +93,7 @@ def filtered_mapping(tmp_path, *, source_frames=(0, 1, 3, 4), timestamps=(0.0, 0
                 source_timestamp=time,
                 action_source_row_index=frame + 1,
                 action_source_frame_index=frame + 1,
-                action_source_timestamp=time + 0.1,
+                action_source_timestamp=source_times.get(frame + 1, time + 0.1),
             )
             for i, (frame, time) in enumerate(zip(source_frames, timestamps, strict=True))
         ],
@@ -101,7 +102,7 @@ def filtered_mapping(tmp_path, *, source_frames=(0, 1, 3, 4), timestamps=(0.0, 0
     return mapping
 
 
-def filtered_conversion(*, missing_steps=0, frames=6):
+def filtered_conversion(*, missing_steps=0, frames=6, removed=1, excluded=(2,)):
     return {
         "version": 4,
         "terminal_frame_policy": "omit final source observation; use it only as the previous frame action target",
@@ -110,7 +111,8 @@ def filtered_conversion(*, missing_steps=0, frames=6):
                 output_episode_index=0,
                 source_episode_index=0,
                 frames=frames,
-                removed_supervised_samples=1,
+                removed_supervised_samples=removed,
+                excluded_image_frame_ids=list(excluded),
                 missing_candidate_steps=missing_steps,
             )
         ],
@@ -135,7 +137,7 @@ def test_filtered_mapping_breaks_compacted_time_gap(tmp_path):
 
     filtered_mapping(tmp_path, source_frames=(0, 1, 2, 3))
     np.testing.assert_array_equal(
-        audit_episode_edges(tmp_path, filtered_conversion(missing_steps=1), 0, 4),
+        audit_episode_edges(tmp_path, filtered_conversion(missing_steps=1, frames=5, removed=0, excluded=()), 0, 4),
         [True, False, True],
     )
 
@@ -169,3 +171,41 @@ def test_filtered_mapping_rejects_untrue_supplied_adjacency(tmp_path):
     filtered_mapping(tmp_path)
     with pytest.raises(ValueError, match="adjacency"):
         audit_episode_edges(tmp_path, filtered_conversion(), 0, 4, {"0": [True, True, True]})
+
+
+def test_mapping_reconciles_source_bounds_exclusions_and_missing_steps(tmp_path):
+    from openpi.training.aft_data import audit_episode_edges
+
+    mapping = filtered_mapping(tmp_path, source_frames=(100, 101, 102, 103), timestamps=(0, .1, .2, .3))
+    with pytest.raises(ValueError, match="bounds|range"):
+        audit_episode_edges(tmp_path, filtered_conversion(missing_steps=1), 0, 4)
+    mapping["rows"] = filtered_mapping_rows = [
+        {**row, "source_row_index": frame, "source_frame_index": frame,
+         "action_source_row_index": frame + 1, "action_source_frame_index": frame + 1,
+         "source_timestamp": frame * .1, "action_source_timestamp": (frame + 1) * .1}
+        for row, frame in zip(mapping["rows"], (0, 1, 3, 4), strict=True)
+    ]
+    (tmp_path / "meta/source_mapping/episode_000000.json").write_text(json.dumps(mapping))
+    with pytest.raises(ValueError, match="missing.*step|timing"):
+        audit_episode_edges(tmp_path, filtered_conversion(missing_steps=1), 0, 4)
+    with pytest.raises(ValueError, match="excluded|exclusion"):
+        audit_episode_edges(tmp_path, filtered_conversion(excluded=(1,)), 0, 4)
+    filtered_mapping_rows[-1]["action_source_row_index"] = 6
+    (tmp_path / "meta/source_mapping/episode_000000.json").write_text(json.dumps(mapping))
+    with pytest.raises(ValueError, match="bounds|range"):
+        audit_episode_edges(tmp_path, filtered_conversion(), 0, 4)
+
+
+def test_next_state_label_audit_compares_physical_rotation_only_on_continuous_edges():
+    from openpi.training.aft_data import validate_next_state_labels
+
+    r = rows(4)
+    edges = np.ones(3, bool)
+    r["state"][1, 3] = np.pi - .01
+    r["actions"][0, 3] = -np.pi - .01
+    validate_next_state_labels(r, edges, 0)
+    r["actions"][0, 0] = .02
+    with pytest.raises(ValueError, match="next_state"):
+        validate_next_state_labels(r, edges, 0)
+    edges[0] = False
+    validate_next_state_labels(r, edges, 0)

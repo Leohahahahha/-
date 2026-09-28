@@ -5,11 +5,15 @@ import hashlib
 import json
 import pathlib
 
+import numpy as np
+
 
 from openpi import transforms
 from openpi.policies.aft_policy import fit_sensor_stats
 from openpi.shared import normalize
-from openpi.training.aft_data import audit_episode_edges, build_episode_windows, read_episode, source_mapping_path
+from openpi.training.aft_data import (
+    audit_episode_edges, build_episode_windows, read_episode, source_mapping_path, validate_next_state_labels,
+)
 from openpi.training.aft_assets import model_contract
 
 
@@ -38,6 +42,15 @@ def collect_statistics(episodes, edges, *, horizon, action_offset):
     return stats
 
 
+def window_target_counts(edges, *, horizon, action_offset):
+    """Count valid horizon slots by continuous segments, without reading tensor targets."""
+    boundaries = np.r_[0, np.flatnonzero(~edges) + 1, len(edges) + 1]
+    lengths = np.diff(boundaries)
+    sensors = sum(min(horizon, remaining) for length in lengths for remaining in range(length))
+    actions = sum(min(horizon, remaining + 1 - action_offset) for length in lengths for remaining in range(length))
+    return int(actions), int(sensors)
+
+
 def main(config, output_dir, edges_json=None):
     from openpi.training.config import get_config
 
@@ -57,14 +70,32 @@ def main(config, output_dir, edges_json=None):
     supplied = json.loads(pathlib.Path(edges_json).read_text()) if edges_json else None
     # Audit both splits before producing anything that could be mistaken for ready assets.
     all_ids = (*data.episodes, *data.validation_episodes)
+    all_rows = {ep: read_episode(str(root), ep) for ep in all_ids}
     edges = {
-        ep: audit_episode_edges(root, conversion, ep, len(read_episode(str(root), ep)["state"]), supplied)
+        ep: audit_episode_edges(root, conversion, ep, len(all_rows[ep]["state"]), supplied)
         for ep in all_ids
     }
+    if data.aft_action_state_step_offset:
+        for ep in all_ids:
+            validate_next_state_labels(all_rows[ep], edges[ep], ep)
     true_edges = sum(int(e.sum()) for e in edges.values())
     false_edges = sum(int((~e).sum()) for e in edges.values())
     print(f"Audited {len(edges)} episodes: {true_edges} contiguous and {false_edges} broken source edges")
-    train = {ep: read_episode(str(root), ep) for ep in data.episodes}
+    counts = [window_target_counts(e, horizon=c.model.action_horizon,
+                                  action_offset=data.aft_action_state_step_offset) for e in edges.values()]
+    reports = [r for r in conversion["timing_reports"] if r["output_episode_index"] in all_ids]
+    audit_summary = {
+        "episodes": len(all_ids),
+        "retained_frames": sum(len(r["state"]) for r in all_rows.values()),
+        "removed_supervised_samples": sum(r.get("removed_supervised_samples", 0) for r in reports),
+        "missing_candidate_steps": sum(r.get("missing_candidate_steps", 0) for r in reports),
+        "continuous_edges": true_edges,
+        "broken_edges": false_edges,
+        "valid_action_targets": sum(a for a, _ in counts),
+        "valid_sensor_targets": sum(s for _, s in counts),
+    }
+    print(f"AFT audit summary: {json.dumps(audit_summary)}")
+    train = {ep: all_rows[ep] for ep in data.episodes}
     stats = collect_statistics(
         train, edges, horizon=c.model.action_horizon, action_offset=data.aft_action_state_step_offset
     )
@@ -91,6 +122,7 @@ def main(config, output_dir, edges_json=None):
             for ep in all_ids
             if source_mapping_path(root, ep).exists()
         },
+        audit_summary=audit_summary,
     )
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
     print(f"AFT train-only assets saved: {output}; training was not started.")
