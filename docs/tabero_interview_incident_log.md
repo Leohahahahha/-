@@ -78,7 +78,7 @@
 | 2026-09-23 | A/F/T实现、注意力标签隔离与资产/精度契约（53） | 模型/数据/验证 | 实现及独立审阅修复；CPU回归通过，真实断点映射仍待恢复 |
 | 2026-09-23 | 首次推送新分支的TLS中断与GitHub 403（54） | 工程环境/权限 | 网络已恢复；当前账号缺少原仓库写权限 |
 | 2026-09-27 | A/F/T 慢专家对白板 v2 数据及 FR3 部署的契约缺口（55） | 数据时序/服务接口/真机输入 | 兼容代码与 CPU 准备/测试已验证；GPU训练、shadow、真机待验证 |
-| 2026-09-28 | 推理注意力可视化与模态作用的区别（56） | 模型解释/部署诊断 | 源码已核对；诊断接口及成对实验尚未实现 |
+| 2026-09-28 | 推理注意力可视化与模态作用的区别（56） | 模型解释/部署诊断 | 默认关闭的诊断/绘图已实现并经CPU测试；真实权重及部署侧接入待验证 |
 
 ## 1. Bash 多行粘贴触发 `free(): invalid pointer`
 
@@ -683,12 +683,12 @@
 ## 56. 推理注意力可视化与模态作用的区别
 
 - **日期**：2026-09-28。
-- **状态**：当前注意力实现与可观察范围已核对；未实现注意力导出、热力图或模态消融功能。
+- **状态**：用户批准后已实现默认关闭的 attention 导出、模态汇总、配对历史扰动、服务端记录和离线绘图；部署 AI 交接文档已写。尚未运行真实 checkpoint 诊断或接入远端部署副本。
 - **现象**：用户希望同时查看推理每个时刻的模态融合权重、注意力热力图以及触觉/力对动作的作用。
-- **证据**：`gemma.py` 的 Attention 内部计算 softmax 概率 `probs[B,K,G,Q,S]`，但只返回聚合后的特征和 KV cache；`aft.py` 拼接 VLM、动作、触觉、力流并给三路未来 token 使用相同 horizon 索引。触觉 TCN 和力 MLP 各把历史压成一个 token，并非逐历史帧独立 attention token。
+- **证据**：原 `gemma.py` 内部 softmax 概率未导出；新增参数自由的选定query head均值通过原scan沿层堆叠。`aft.py::sample_attention` 固定RNG回放同一Euler轨迹到选定去噪步骤，未来query三路索引对齐。小模型π0/π0.5测试验证概率和、padding为零、参数树不变、回放速度场与正常采样一致；历史敏感小网络测试验证扰动共享噪声且不改变baseline或输入。绘图测试输出三张PNG，视觉检查的是合成fixture，不是真实模型结果。触觉TCN与力MLP仍各只产生一个历史token。
 - **根因或明确假设**：当前没有直接返回的“触觉融合百分比”参数；注意力概率描述特征读取分配，不能等同于模态的因果贡献。历史压缩后也不能仅凭联合 attention 还原每个历史帧或每个 marker 的权重。
-- **方案**：可选推理诊断在模型 attention 内采集、在服务端返回或落盘、由部署客户端标记观测时间及计划步并绘图；不需要改变训练 loss 或重训。图包括未来 query×key 热力图、按模态汇总的 attention mass、固定样本与三路初始噪声的历史条件扰动动作差异曲线。模态总概率受 token 数影响，应同时报告每 token 平均值及实际 token 数；扰动实验保留未来三路生成结构，解释为该扰动下的敏感性，不等同于重新训练无模态基线。
-- **验证范围**：只读源码核对与说明文档；未进行实际 checkpoint 推理、性能测试或机器人执行。拟议额外推理应先用于离线或 shadow，避免影响真实控制时延。
+- **修复/实现**：添加服务端诊断开关/抽样周期/层/query stride/去噪步及可选三次历史扰动；返回`aft_diagnostics_v1`，计算有效key组总mass、每token平均及counts。只把归一化历史替换为统计均值，保留future三路生成、mask和RNG；姿态差异用SO(3)。JSON+numeric NPZ禁止pickle/覆盖，暂存后独占发布且manifest最后可见；普通写盘/发布失败清理本次文件，策略响应标记capture_error并保留baseline预测。层编号在configure阶段校验。独立review三项重要问题已补红绿测试修复。文档`docs/aft_inference_diagnostics_deployment_handoff.md`明确客户端还需接收诊断、标记采集时间/plan_id及后台记录；训练仍双卡FSDP2，不增加训练loss或参数。
+- **验证范围**：97项AFT/部署定向CPU测试通过（含原客户端安全与metadata回归）；独立review另跑22项通过；E/F lint排除已有jaxtyping F722误报后通过，Git whitespace检查通过。首次扩大CPU项目测试233通过/9失败：tokenizer与transforms四项默认缓存只读；旧tabero_offline factory触觉两项和tabero_baseline inverse一项使用无效reference-grid；data_loader fake及train debug两项缺少debug配置。后五项在改动前d734786干净归档中同样失败；改用已有OPENPI缓存后三个文本tokenizer测试通过，FAST测试仍缺离线资产。未修复这些无关旧测试，未运行巨型模型/网络下载/Orbax roundtrip测试；上游JAX/Flax弃用警告仍在。无真实checkpoint/GPU峰值/训练/W&B/ROS/shadow/机器人执行验证；诊断开销先在离线或shadow实测，不能据CPU测试保证在线安全。
 - **面试讲法**：先分清 attention 在读取什么、输入扰动是否改变输出以及是否改善闭环性能；用热力图解释交互，用固定噪声的配对实验衡量敏感性，不把高注意力直接称为传感器贡献。
 
 ## 当前推荐的端到端排查顺序

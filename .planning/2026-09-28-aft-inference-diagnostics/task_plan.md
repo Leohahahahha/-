@@ -1,0 +1,23 @@
+# AFT inference diagnostics
+
+User approved the prior in-chat design: optional attention export, modality summaries and paired normalized-history perturbations; deployment AI handoff documentation; retain dual-GPU training. This is a bounded extension of existing model/policy/serving flows, not a new expert architecture.
+
+## Phases
+
+1. Recover previous changes and verify CPU baseline — complete.
+2. Test-first opt-in attention capture without parameter-tree or default inference changes — complete.
+3. Test-first policy diagnostics, fixed-noise perturbations, export/plot and server options — complete.
+4. Deployment handoff, incident log, dual-GPU instructions, regression verification and Git commits — complete (code 2e4a9c8; documentation saved alongside this plan).
+
+## Constraints
+
+- Work only in linked worktree on 部署代码兼容版本; leave dirty original training branch untouched.
+- No training, robot calls, external upload or dependency changes without need.
+- Default-off diagnostics must preserve standard predictions and checkpoint parameter names.
+- Attention describes reads, not causal contribution. Perturb only normalized history, retain future A/T/F generation.
+- Capture head-averaged attention at one configured denoising step; report explicit layer/query/token layout.
+- Handoff consumers must not feed diagnostic output into robot control.
+
+## Errors
+
+Logged in progress.md: mistaken dummy-depth and mean-history fixtures corrected; capture failure/orphan/layer bounds reproduced and fixed. Broader project suite has 9 unrelated/environment failures, with 5 reproduced on baseline d734786 and 3 tokenizer cache cases recovered using existing cache. FAST asset absent. First view_image used a pytest temp path already pruned; later fresh-path inspection succeeded. No unsafe integration/merge is performed while full suite remains red.

@@ -1,0 +1,23 @@
+# Progress
+
+2026-09-28: Recovered isolated worktree and previous task state. Read brainstorming, planning-with-files, TDD/test reference and verification skills. Prior short design approved by user's request to implement. No model training started. Will reuse existing environment and CPU toy models for diagnostics verification.
+
+Baseline: 83 targeted CPU tests passed in 7.92 s. Prior temporary data preparation completed: 39 episodes, 15,242 true/40 false edges, 670,040 valid action/sensor slots. E/F lint and git diff whitespace checks passed. GPU and real-checkpoint validation remain unperformed.
+
+Prior compatibility changes saved as 17cd525 (data integrity/preflight) and d734786 (three-head client/logging). Attention tests failed first because sample_attention was absent. Added parameter-free optional head-mean output through existing Gemma scan, with separate fixed-noise replay. Next run exposed a test fixture mistake (dummy transformer depth is 4, not 2); verified gemma.get_config and corrected only that expectation. Policy/aggregation tests failed first on missing aft_diagnostics module, then implemented opt-in options, summaries, SO(3) differences and paired normalized-history perturbations.
+
+Attention replay and aggregation now pass. Policy test expected a nonzero force perturbation but its raw all-one history equalled stats.mean=1, so normalized history was already zero. Diagnosed at the normalization boundary; changed test raw force to 2 (normalized +0.5), retaining the independently derived 1 mm expectation. No production normalization change.
+
+Bundle/server/plot tests failed first on missing APIs, then implemented numeric NPZ+JSON export (no pickle/overwrite), server-only flags and three figures. Latest policy/export/server/plot set: 21 passed in 11.16 s. Model replay set passed in previous combined run. E/F lint exposed new long lines (fixed) and pre-existing jaxtyping F722 false positives; new query annotation simplified to jax.Array. One test insertion initially split an existing function; restored original function before implementation (all old cases now passed).
+
+Independent reviewer found IO failures losing valid responses, orphan bundles and late layer validation. Reproduced each with red tests; added static attention_depth configuration check, staged numeric files with exclusive publication/cleanup, and explicit capture error response without changing baseline predictions. Reviewer declined GPU memory/latency, dual-GPU training, production-checkpoint numerical equivalence and robot/shadow behavior: all remain pending; risk if assumed would be OOM, timing violations or unsafe/unproven deployment.
+
+Broad CPU project run (excluding full-size model, download and Orbax roundtrip modules, plus remote real dataset): 233 passed, 9 failed. Failures include tokenizer/default-cache read-only path, legacy physical fixture checks and missing debug config. Investigating against a clean pre-diagnostics archive before labeling regressions; do not claim full suite green. Upstream JAX/Flax deprecation warnings remain.
+
+Final targeted AFT/deployment CPU verification: 97 passed in76.28s; warnings are upstream JAX/Flax deprecations. E/F lint (ignoring pre-existing jaxtyping F722) and whitespace checks passed. Independent followup:22 passed, all Important review findings resolved; complete handoff reviewed. Original training checkout still dirty only with prior user files, untouched by implementation.
+
+Broad failure triage: pre-diagnostics d734786 clean archive reproduced exactly 5 legacy failures (2 tabero_offline tactile factory, baseline inverse reference-grid, data_loader missing debug and train debug). Existing OPENPI cache fixes3 tokenization failures; FAST test lacks offline HF assets, not downloaded. No unrelated fixture/config edits. Full suite is not green; finishing skill prohibits merge/PR menu/integration, so only save feature commits and preserve branch/worktree for user.
+
+Wrote full deployment AI handoff including shapes/flags/clients/timestamps/diagnostic-only safety, dual-GPU user-run commands, limitations and all broad failures by name. Inspected test heatmap layout via view_image after initial stale pytest-path lookup failed; clearly labelled synthetic fixture, not model result. No training, real checkpoint/GPU validation, upload or robot work performed.
+
+Fresh pre-commit check:26 focused policy/diagnostic/server/plot/config tests passed in10.17s; lint/whitespace green within declared scope. Committed code and tests as2e4a9c8. Saving handoff, incident log and persistent planning as a separate documentation commit. Branch/worktree remain preserved, no merge/push given unrelated full-suite reds and user scope.

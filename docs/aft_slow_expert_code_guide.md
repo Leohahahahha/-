@@ -2,6 +2,8 @@
 
 更新：2026-09-28。当前为新增架构及 FR3 兼容代码实现；CPU单元/集成验证不代表训练收敛或真机部署验证。原Pi0路径继续保留。
 
+推理注意力与历史扰动诊断的开关、响应shape、绘图命令及部署端修改点见 [部署AI交接文档](aft_inference_diagnostics_deployment_handoff.md)。诊断默认关闭，不修改训练loss或checkpoint参数树；训练继续双卡FSDP2。交接文档中的训练/服务命令由用户手动运行。
+
 ## 从哪里开始读
 
 按 `aft_types.py → aft_data.py → aft_policy.py → aft_config.py → aft.py → train.py` 阅读。这里的文件分别位于 `src/openpi/models`、`src/openpi/training`、`src/openpi/policies` 和 `scripts`。模型入口是 `AFTConfig.create()`，核心是 `AFTModel.flow()`。
